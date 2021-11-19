@@ -1,0 +1,39 @@
+# C++
+bin/
+build/
+
+# Python
+/applications/.idea
+/applications/env
+*.pyc
+.ipynb_checkpoints/
+/applications/experiments/**/*.sh
+
+# Docker
+/docker/bin
+/docker/source
+
+# LaTeX
+*-eps-converted-to.pdf
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex
+/paper-vis20/main.pdf
+*.tps
+
+# Results
+/applications/neuraltextures/results
+/paper/tech-report-holograms/main.pdf
+/paper/tech-report-scenenet/main.tex
+*.pygstyle
+*.pygtex
+/paper/tech-report-scenenet/main.pdf
+/applications/superresolution/results/
+/applications/volnet/cache/
+/applications/volnet/results/
+*mc-cache.hdf5
+/applications/test-slide*
+/applications/test-*.png
