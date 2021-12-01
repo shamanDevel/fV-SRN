@@ -1,6 +1,6 @@
 # Fast Neural Representations for Direct Volume Rendering
 
-![Teaser](readme-images\Teaser.png)
+![Teaser](readme-images/Teaser.png)
 
 [Sebastian Weiss](https://github.com/shamanDevel), Philipp Hermüller, Rüdiger Westermann
 
