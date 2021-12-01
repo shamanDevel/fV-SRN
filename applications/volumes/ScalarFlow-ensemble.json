@@ -1,0 +1,7 @@
+{
+    "format": "ScalarFlow/sim_%1$06d/volume_%2$06d.cvol",
+    "start_timestep": 1,
+    "num_timesteps": 150,
+    "start_ensemble": 0,
+    "num_ensembles": 11
+}
