@@ -10,6 +10,8 @@ This repository contains the code and settings to reproduce all figures (and mor
 
 [How to reproduce the figures](#how-to-reproduce-the-figures)
 
+[![Watch the video](https://img.youtube.com/vi/mnHG2Y0h0xc/default.jpg)](https://youtu.be/mnHG2Y0h0xc)
+
 ## Requirements
 
  - NVIDIA GPU with RTX, e.g. RTX20xx or RTX30xx (we use an RTX2070)
