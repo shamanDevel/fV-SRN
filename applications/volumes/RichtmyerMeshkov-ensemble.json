@@ -1,0 +1,5 @@
+{
+    "format": "RichtmyerMeshkov/ppm-t%2$04d.cvol",
+    "start_timestep": 0,
+    "num_timesteps": 256
+}
