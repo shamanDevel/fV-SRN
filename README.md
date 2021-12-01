@@ -6,11 +6,13 @@
 
 This repository contains the code and settings to reproduce all figures (and more) from the paper.
 
+### Jump to
 [How to train a new network](#how-to-train)
 
 [How to reproduce the figures](#how-to-reproduce-the-figures)
 
-[![Watch the video](https://img.youtube.com/vi/mnHG2Y0h0xc/default.jpg)](https://youtu.be/mnHG2Y0h0xc)
+### Video
+[![Watch the video](https://img.youtube.com/vi/mnHG2Y0h0xc/hqdefault.jpg)](https://youtu.be/mnHG2Y0h0xc)
 
 ## Requirements
 
