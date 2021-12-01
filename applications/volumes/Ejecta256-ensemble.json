@@ -1,0 +1,5 @@
+{
+    "format": "Ejecta256/snapshot_%2$03d_256.cvol",
+    "start_timestep": 1,
+    "num_timesteps":  98
+}
