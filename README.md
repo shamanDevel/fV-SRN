@@ -5,6 +5,7 @@
 [Sebastian Weiss](https://github.com/shamanDevel), Philipp Hermüller, Rüdiger Westermann
 
 This repository contains the code and settings to reproduce all figures (and more) from the paper.
+https://arxiv.org/abs/2112.01579
 
 ### Jump to
 [How to train a new network](#how-to-train)
