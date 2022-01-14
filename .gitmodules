@@ -2,6 +2,9 @@
 	path = third-party/cuMat
 	url = https://gitlab.com/shaman42/cuMat.git
 	branch = v1.2-18-gfc639d7
+[submodule "third-party/lodepng"]
+	path = third-party/lodepng
+	url = https://github.com/lvandeve/lodepng.git
 [submodule "third-party/cudad"]
 	path = third-party/cudad
 	url = https://gitlab.com/shaman42/cudad.git
