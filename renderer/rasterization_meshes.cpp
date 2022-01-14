@@ -9,6 +9,7 @@ renderer::RasterizationMeshes::MeshInfo::MeshInfo(
     , diffuseColor_(glm::vec3(0.5f))
     , modelMatrix_(glm::identity<glm::mat4>())
 {
+#if RENDERER_OPENGL_SUPPORT==1
     if (vertices.ndim() != 2)
         throw std::runtime_error("Incompatible buffer dimension for the vertices, expected (N,3)!");
     if (vertices.shape(1) != 3)
@@ -74,6 +75,9 @@ renderer::RasterizationMeshes::MeshInfo::MeshInfo(
     }
 
     data_ = std::make_shared<Mesh>(cpu);
+#else
+    throw std::runtime_error("OpenGL disabled, can't create mesh!");
+#endif
 }
 
 void renderer::RasterizationMeshes::MeshInfo::setModelMatrix(pyFloatArray matrix)

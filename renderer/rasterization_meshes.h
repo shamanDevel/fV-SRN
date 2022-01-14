@@ -40,7 +40,9 @@ public:
         glm::vec3 ambientColor_;
         glm::vec3 diffuseColor_;
         glm::mat4 modelMatrix_;
+#if RENDERER_OPENGL_SUPPORT==1
         Mesh_ptr data_;
+#endif
     };
     typedef std::shared_ptr<MeshInfo> MeshInfo_ptr;
 
@@ -66,7 +68,9 @@ protected:
     void registerPybindModule(pybind11::module& m) override;
 
 private:
+#if RENDERER_OPENGL_SUPPORT==1
     Shader_ptr shader_;
+#endif
     std::vector<MeshInfo_ptr> meshes_;
 };
 
