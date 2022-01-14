@@ -8,11 +8,7 @@
 #include <GL/glew.h>
 #include <cuda_gl_interop.h>
 #include <tinyformat.h>
-
-#define NOMINMAX
-#include <windows.h>
 #include <GLFW/glfw3.h>
-
 #include <glm/glm.hpp>
 
 #include <imgui.h>
