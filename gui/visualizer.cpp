@@ -3,6 +3,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+//For the timestamp of the screenshots
+#ifdef _MSC_VER
+#define NOMINMAX
+#include <Windows.h>
+#else
+#include <time.h>
+#endif
 
 #include <cuMat/src/Errors.h>
 #include <GL/glew.h>
@@ -460,7 +467,12 @@ void Visualizer::screenshot()
 	char time_str[128];
 	time_t now = time(0);
 	struct tm tstruct;
+#ifdef _MSC_VER
+	//Why Microsoft?
 	localtime_s(&tstruct, &now);
+#else
+	localtime_s(&now, &tstruct);
+#endif
 	strftime(time_str, sizeof(time_str), "%Y%m%d-%H%M%S", &tstruct);
 
 	char output_name[512];
