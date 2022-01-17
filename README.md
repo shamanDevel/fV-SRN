@@ -46,6 +46,12 @@ After compiling the C++ library, the network training and evaluation is performe
 - `applications/losses`: the loss functions, including SSIM and LPIPS
 - `applications/volnet`: the main network code for training in inference, see below.
 
+### Common compilation issues
+
+- Wrong python version used: make sure to run cmake in the same console where the correct python version is selected via conda or virtualenv. This must be done on a clean `build`-folder, as the paths to the python libraries are cached in the `build/CMakeCache.txt`-file.
+- Wrong pytorch version used or no pytorch found: Sometimes, the automatic query of the PyTorch installation folder from the current Python installation failes. You can manually specify the path to PyTorch by passing `-DTORCH_PATH=...` as argument to CMake
+- Libraries `torch_cuda_cpp` and `torch_cuda_cu` are not found. Some PyTorch installations don't split the CUDA-kernels into different libraries, but have a single monolitic library `torch_cuda`. In that case, simply remove `torch_cuda_cpp` and `torch_cuda_cu` from https://github.com/shamanDevel/fV-SRN/blob/master/CMakeLists.txt#L125. If you know a way to query if PyTorch was built with the CUDA-kernels split into multiple libraries, please write me or open an issue. Thanks
+
 ## Noteworthy Files
 
 Here we list and explain noteworthy files that contain important aspects of the presented method
