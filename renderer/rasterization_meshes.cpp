@@ -109,8 +109,6 @@ renderer::RasterizationMeshes::RasterizationMeshes()
 {
 #if RENDERER_OPENGL_SUPPORT==1
     shader_ = std::make_shared<Shader>("PassThrough.vs", "SimpleDiffuse.fs");
-#else
-    throw std::runtime_error("Library not compiled with OpenGL-support. Can't instantiate RasterizationMeshes!");
 #endif
 }
 
