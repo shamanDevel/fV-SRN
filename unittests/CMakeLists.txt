@@ -10,7 +10,6 @@ set(TEST_FILES
 	main.cpp
 	check_adjoint.h
 	test_utils.h
-	testNeuralTexture.cpp
 	testPhaseFunction.cpp
 	testVolumeInterpolation.cpp
 	testEnsemble.cpp

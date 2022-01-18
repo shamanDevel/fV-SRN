@@ -9,6 +9,9 @@
 #include <Windows.h>
 #else
 #include <time.h>
+#ifndef MAX_PATH
+#define MAX_PATH 260
+#endif
 #endif
 
 #include <cuMat/src/Errors.h>
@@ -466,14 +469,15 @@ void Visualizer::screenshot()
 
 	char time_str[128];
 	time_t now = time(0);
-	struct tm tstruct;
+	struct tm* tstruct_ptr;
 #ifdef _MSC_VER
-	//Why Microsoft?
+	struct tm tstruct;
 	localtime_s(&tstruct, &now);
+	tstruct_ptr = &tstruct;
 #else
-	localtime_s(&now, &tstruct);
+	tstruct_ptr = localtime(&now);
 #endif
-	strftime(time_str, sizeof(time_str), "%Y%m%d-%H%M%S", &tstruct);
+	strftime(time_str, sizeof(time_str), "%Y%m%d-%H%M%S", tstruct_ptr);
 
 	char output_name[512];
 	sprintf(output_name, "%s/screenshot_%s.png", folder.c_str(), time_str);
