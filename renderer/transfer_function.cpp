@@ -209,7 +209,7 @@ torch::Tensor renderer::ITransferFunction::evaluate(
 	extraSource << "#define TRANSFER_FUNCTION_T " <<
 		getPerThreadType(s) << "\n";
 	extraSource << "#include \"renderer_tf_kernels.cuh\"\n";
-	const auto& fun = KernelLoader::Instance().getKernelFunction(
+	const auto fun = KernelLoader::Instance().getKernelFunction(
 		kernelName, extraSource.str(), constantNames, false, false).value();
 	if (auto c = getConstantDeclarationName(s); !c.empty())
 	{

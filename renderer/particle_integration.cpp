@@ -197,9 +197,9 @@ void renderer::ParticleIntegration::particlesSeedAndAdvect(double deltaTime, con
         << "\n// INCLUDES:\n" << includes.str();
 
     //create kernel
-    const auto& seedKernel = KernelLoader::Instance().getKernelFunction(
+    const auto seedKernel = KernelLoader::Instance().getKernelFunction(
         "ParticleIntegrateSeed", sourceFile.str(), constantNames, false, false);
-    const auto& advectionKernel = KernelLoader::Instance().getKernelFunction(
+    const auto advectionKernel = KernelLoader::Instance().getKernelFunction(
         "ParticleIntegrationAdvect", sourceFile.str(), constantNames, false, false);
     if (!seedKernel.has_value())
         throw std::runtime_error("Error compiling seeding kernel");

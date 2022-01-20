@@ -89,7 +89,7 @@ The training is launched via `applications/volnet/train_volnet.py`. Have a look 
 
 A typical invocation looks like this (this is how fV-SRN with Ejecta from Fig. 1 was trained)
 
-    python train_volnet.py
+    python volnet/train_volnet.py
        config-files/ejecta70-v6-dvr.json
        --train:mode world  # instead of 'screen', Sec. 5.4
        --train:samples 256**3
@@ -106,7 +106,7 @@ A typical invocation looks like this (this is how fV-SRN with Ejecta from Fig. 1
        --volumetric_features_resolution 32  # the grid specification, see Sec. 5.2
        --volumetric_features_channels 16
        -l1 1  #use L1-loss with weight 1
-       --lr 0.01
+       -lr 0.01
        --lr_step 100  #lr reduction after 100 epochs, default lr is used 
        -i 200  # number of epochs
        --save_frequency 20  # checkpoints + test visualization

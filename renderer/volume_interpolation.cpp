@@ -183,7 +183,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 
 	//compile and fill constants
 	extraSource << "#include \"renderer_volume_kernels2.cuh\"\n";
-	const auto& fun = KernelLoader::Instance().getKernelFunction(
+	const auto fun = KernelLoader::Instance().getKernelFunction(
 		kernelName, extraSource.str(), constantNames, false, false).value();
 	if (auto c = getConstantDeclarationName(s); !c.empty())
 	{
@@ -308,7 +308,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 
 	//compile and fill constants
 	extraSource << "#include \"renderer_volume_kernels3.cuh\"\n";
-	const auto& fun = KernelLoader::Instance().getKernelFunction(
+	const auto fun = KernelLoader::Instance().getKernelFunction(
 		kernelName, extraSource.str(), constantNames, false, false).value();
 	if (auto c = getConstantDeclarationName(s); !c.empty())
 	{

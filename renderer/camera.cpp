@@ -57,7 +57,7 @@ std::tuple<torch::Tensor, torch::Tensor> renderer::ICamera::generateRays(
 	extraSource << "#define IMAGE_EVALUATOR__CAMERA_T " <<
 		getPerThreadType(s) << "\n";
 	extraSource << "#include \"renderer_camera_kernels.cuh\"\n";
-	const auto& fun = KernelLoader::Instance().getKernelFunction(
+	const auto fun = KernelLoader::Instance().getKernelFunction(
 		kernelName, extraSource.str(), constantNames, false, false).value();
 	if (auto c = getConstantDeclarationName(s); !c.empty())
 	{

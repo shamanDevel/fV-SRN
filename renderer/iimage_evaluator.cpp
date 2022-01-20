@@ -185,7 +185,7 @@ renderer::KernelLoader::KernelFunction renderer::IImageEvaluator::getKernel(
 		<< "\n// MAIN SOURCE:\n" << extraSource;
 
 	//create kernel
-	const auto& fun = KernelLoader::Instance().getKernelFunction(
+	const auto fun = KernelLoader::Instance().getKernelFunction(
 		kernelName, sourceFile.str(), constantNames, false, false);
 	return fun.value();
 }
