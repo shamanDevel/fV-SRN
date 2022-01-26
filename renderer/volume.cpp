@@ -6,6 +6,7 @@
 #include <cuMat/src/Errors.h>
 #include <filesystem>
 #include <chrono>
+#include <algorithm>
 #include <lz4cpp.hpp>
 #include <string.h>
 #include <json.hpp>
@@ -780,7 +781,6 @@ Volume::Volume(const std::string& filename,
 	{
 	    //load new version
 		int version;
-		float voxelSizeX, voxelSizeY, voxelSizeZ;
 		int numFeatures;
 		int flags;
 		s.read(reinterpret_cast<char*>(&version), 4);
@@ -788,9 +788,9 @@ Volume::Volume(const std::string& filename,
         {
 			error("Unknown file version!", -3);
         }
-		s.read(reinterpret_cast<char*>(&voxelSizeX), 4);
-		s.read(reinterpret_cast<char*>(&voxelSizeY), 4);
-		s.read(reinterpret_cast<char*>(&voxelSizeZ), 4);
+		s.read(reinterpret_cast<char*>(&worldSizeX_), 4);
+		s.read(reinterpret_cast<char*>(&worldSizeY_), 4);
+		s.read(reinterpret_cast<char*>(&worldSizeZ_), 4);
 		s.read(reinterpret_cast<char*>(&numFeatures), 4);
 		s.read(reinterpret_cast<char*>(&flags), 4);
 		s.ignore(4);
