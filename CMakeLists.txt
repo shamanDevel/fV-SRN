@@ -103,9 +103,13 @@ endif()
 
 if(NOT ${RENDERER_ONLY_RESOURCES})
     # find installation path
-    if(NOT DEFINED ${TORCH_PATH})
+    if(NOT DEFINED TORCH_PATH)
         # query torch path from python
-        execute_process(COMMAND CMD /c python -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.include_paths()[0])" OUTPUT_VARIABLE TORCH_FIRST_INCLUDE_DIR)
+        if (WIN32)
+            execute_process(COMMAND CMD /c python -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.include_paths()[0])" OUTPUT_VARIABLE TORCH_FIRST_INCLUDE_DIR)
+        else()
+            execute_process(COMMAND ${PYTHON_EXECUTABLE} -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.include_paths()[0])" OUTPUT_VARIABLE TORCH_FIRST_INCLUDE_DIR)
+        endif()
         get_filename_component(TORCH_ROOT ${TORCH_FIRST_INCLUDE_DIR}/../ ABSOLUTE)
         set(TORCH_PATH "${TORCH_ROOT}" CACHE FILEPATH "path to pytorch in the python installation")
         if(NOT (EXISTS ${TORCH_PATH}))
