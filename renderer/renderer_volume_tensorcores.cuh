@@ -10,7 +10,7 @@
 #include <mma.h>
 
 /**
-* For the brave souls who get this far and untangle to code below,
+* For the brave souls who get this far and untangle the code below,
 * you are the chosen ones, the saviors of the art of programming,
 * the gods among men who can move the world on their fingertips.
 * To you, true saviors, kings of men, I say this:
