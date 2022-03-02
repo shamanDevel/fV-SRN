@@ -291,7 +291,7 @@ namespace kernel
 		{
 #if __CUDA_ARCH__ >= 800 && defined(__CUDA_ARCH__)
 			const half2 ZERO2{ __half_raw{0}, __half_raw{0} };
-			return __h2max(v, ZERO2);
+			return __hmax2(v, ZERO2);
 #else
 			return half2{
 				__float2half(fmaxf(0.f, __half2float(v.x))),
@@ -322,7 +322,7 @@ namespace kernel
 #if __CUDA_ARCH__ >= 800 && defined(__CUDA_ARCH__)
 			const half ONE = __float2half(1.0f);
 			const half2 ONE2{ ONE, ONE };
-			return __h2div(ONE2, __h2add(ONE2, h2exp(__h2neg(v))));
+			return __h2div(ONE2, __hadd2(ONE2, h2exp(__hneg2(v))));
 #else
 			return half2{ Sigmoid(v.x), Sigmoid(v.y) };
 #endif
