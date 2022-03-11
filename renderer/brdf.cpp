@@ -1,14 +1,125 @@
 #include "brdf.h"
 #include <magic_enum.hpp>
 #include <sstream>
+#include <cuMat/src/Macros.h>
 #include <glm/gtx/transform.hpp>
+#include <c10/cuda/CUDAStream.h>
 
 #include "camera.h"
 #include "helper_math.cuh"
 #include "json_utils.h"
+#include "kernel_loader.h"
 #include "pytorch_utils.h"
 #include "renderer_tensor.cuh"
 #include "renderer_commons.cuh"
+
+torch::Tensor renderer::IBRDF::evaluate(const torch::Tensor& rgba, const torch::Tensor& position,
+    const torch::Tensor& gradient, const torch::Tensor& rayDir, CUstream stream)
+{
+	CHECK_CUDA(rgba, true);
+	CHECK_DIM(rgba, 2);
+	CHECK_SIZE(rgba, 1, 4);
+
+	CHECK_CUDA(position, true);
+	CHECK_DIM(position, 2);
+	CHECK_SIZE(position, 1, 3);
+	CHECK_SIZE(position, 0, rgba.size(0));
+
+	CHECK_CUDA(gradient, true);
+	CHECK_DIM(gradient, 2);
+	CHECK_SIZE(gradient, 1, 3);
+	CHECK_SIZE(gradient, 0, rgba.size(0));
+
+	CHECK_CUDA(rayDir, true);
+	CHECK_DIM(rayDir, 2);
+	CHECK_SIZE(rayDir, 1, 3);
+	CHECK_SIZE(rayDir, 0, rgba.size(0));
+
+	GlobalSettings s{};
+	s.scalarType = rgba.scalar_type();
+	s.volumeShouldProvideNormals = true;
+
+	this->prepareRendering(s);
+
+	std::string kernelName = "EvaluateBRDF";
+	std::vector<std::string> constantNames;
+	if (const auto c = getConstantDeclarationName(s); !c.empty())
+		constantNames.push_back(c);
+	std::stringstream extraSource;
+	extraSource << "#define KERNEL_DOUBLE_PRECISION "
+		<< (s.scalarType == GlobalSettings::kDouble ? 1 : 0)
+		<< "\n";
+	extraSource << getDefines(s) << "\n";
+	for (const auto& i : getIncludeFileNames(s))
+		extraSource << "#include \"" << i << "\"\n";
+	extraSource << "#define BRDF_T " <<
+		getPerThreadType(s) << "\n";
+	extraSource << "#include \"renderer_brdf_kernels.cuh\"\n";
+	const auto fun = KernelLoader::Instance().getKernelFunction(
+		kernelName, extraSource.str(), constantNames, false, false).value();
+	if (auto c = getConstantDeclarationName(s); !c.empty())
+	{
+		CUdeviceptr ptr = fun.constant(c);
+		fillConstantMemory(s, ptr, stream);
+	}
+
+	//output tensors
+	int batches = rgba.size(0);
+	auto colors = torch::empty({ batches, 4 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	//launch kernel
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(batches, fun.bestBlockSize())),
+		fun.minGridSize());
+	dim3 virtual_size{
+		static_cast<unsigned int>(batches), 1, 1 };
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "IBRDF::evaluate", [&]()
+		{
+			const auto accRgba = accessor< ::kernel::Tensor2Read<scalar_t>>(rgba);
+			const auto accPos = accessor< ::kernel::Tensor2Read<scalar_t>>(position);
+			const auto accGrad = accessor< ::kernel::Tensor2Read<scalar_t>>(gradient);
+			const auto accDir = accessor< ::kernel::Tensor2Read<scalar_t>>(rayDir);
+			auto accOutput = accessor< ::kernel::Tensor2RW<scalar_t>>(colors);
+
+			const void* args[] = { &virtual_size,
+				&accRgba, &accPos, &accGrad, &accDir, &accOutput };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, fun.bestBlockSize(), 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return colors;
+}
+
+void renderer::IBRDF::registerPybindModule(pybind11::module& m)
+{
+	//guard double registration
+	static bool registered = false;
+	if (registered) return;
+	registered = true;
+
+	namespace py = pybind11;
+	py::class_<IBRDF, IBRDF_ptr>(m, "IBRDF")
+		.def("evaluate", [](IBRDF* self, torch::Tensor rgba, torch::Tensor position, torch::Tensor gradient, torch::Tensor rayDir)
+			{
+				return self->evaluate(rgba, position, gradient, rayDir, c10::cuda::getCurrentCUDAStream());
+			},
+			py::doc(R"doc(
+    Evaluates the BRDF on the given color array and returns the new colors of shape (B,4)
+    :param rgba: input red-green-blue-absorption of shape (B,4)
+    :param position: position of the samples of shape (B,3)
+    :param gradient: density gradients at the sample position of shape (B,3)
+    :param ray_dir: ray direction at the sample positions of shape (B,3)
+    :return: the transformed red-green-blue-absorption colors of shape (B,4)
+)doc"),
+				py::arg("rgba"), py::arg("position"), py::arg("gradient"), py::arg("ray_dir"))
+		;
+}
 
 renderer::BRDFLambert::BRDFLambert()
 	: enableMagnitudeScaling_(false)
@@ -134,8 +245,15 @@ void renderer::BRDFLambert::save(nlohmann::json& json, const ISavingContext* con
 
 void renderer::BRDFLambert::registerPybindModule(pybind11::module& m)
 {
+	IBRDF::registerPybindModule(m);
+
+	//guard double registration
+	static bool registered = false;
+	if (registered) return;
+	registered = true;
+
 	namespace py = pybind11;
-	py::class_<BRDFLambert, std::shared_ptr<BRDFLambert>> c(m, "BRDFLambert");
+	py::class_<BRDFLambert, IBRDF, std::shared_ptr<BRDFLambert>> c(m, "BRDFLambert");
 	py::enum_<LightType>(c, "LightType")
 		.value("Point", LightType::Point)
 		.value("Directional", LightType::Directional)
@@ -370,6 +488,10 @@ void renderer::BRDFLambert::fillConstantMemory(const GlobalSettings& s, CUdevice
 
 bool renderer::BRDFLambert::updateLightFromCamera(const GlobalSettings& s)
 {
+	if (!s.root)
+	{
+		throw std::runtime_error("BRDFLambert: No camera found, light can't follow the camera");
+	}
 	ICamera_ptr cam = std::dynamic_pointer_cast<ICamera>(s.root->getSelectedModuleForTag(ICamera::Tag()));
 	if (!cam)
 	{

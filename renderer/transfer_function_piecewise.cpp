@@ -60,7 +60,9 @@ bool renderer::TransferFunctionPiecewiseLinear::drawUI(UIStorage_t& storage)
 	if (const auto& it = storage.find(VolumeInterpolationGrid::UI_KEY_HISTOGRAM);
 		it != storage.end())
 	{
-		histogram = std::any_cast<Volume::Histogram_ptr>(it->second);
+		histogram = it->second.has_value()
+			? std::any_cast<Volume::Histogram_ptr>(it->second)
+			: nullptr;
 	}
 	if (histogram) {
 		double minDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MIN_DENSITY, 0.0);
@@ -68,7 +70,10 @@ bool renderer::TransferFunctionPiecewiseLinear::drawUI(UIStorage_t& storage)
 		auto histogramRes = (histogram->maxDensity - histogram->minDensity) / histogram->getNumOfBins();
 		int histogramBeginOffset = (minDensity - histogram->minDensity) / histogramRes;
 		int histogramEndOffset = (histogram->maxDensity - maxDensity) / histogramRes;
-		auto maxFractionVal = *std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset);
+		auto maxFractionVal =
+			(histogramEndOffset > histogramBeginOffset)
+			? *std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset)
+			: 1.0f;
 		ImGui::PlotHistogram("", histogram->bins + histogramBeginOffset, histogram->getNumOfBins() - histogramEndOffset - histogramBeginOffset,
 			0, NULL, 0.0f, maxFractionVal, ImVec2(tfEditorOpacityWidth, tfEditorOpacityHeight));
 	}

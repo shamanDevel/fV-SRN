@@ -1,0 +1,285 @@
+#include <cudaCompress/global.h>
+
+#include <cudaCompress/util/Quantize.cuh>
+
+
+namespace cudaCompress {
+
+namespace util {
+
+
+__global__ void quantize2Dkernel(uchar* __restrict__ pQuant, uint stride, const float* __restrict__ pData, uint sizeX, uint sizeY, uint rowPitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(x >= sizeX || y >= sizeY) return;
+
+    uint indexSrc = x + y * rowPitchSrc;
+    uint indexDst = (x + y * sizeX) * stride;
+
+    pQuant[indexDst] = floatToByte(pData[indexSrc]);
+}
+
+__global__ void unquantize2Dkernel(float* __restrict__ pData, const uchar* __restrict__ pQuant, uint stride, uint sizeX, uint sizeY, uint rowPitchDst)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(x >= sizeX || y >= sizeY) return;
+
+    uint indexSrc = (x + y * sizeX) * stride;
+    uint indexDst = x + y * rowPitchDst;
+
+    pData[indexDst] = byteToFloat(pQuant[indexSrc]);
+}
+
+
+
+__global__ void symbolizeKernel(
+    ushort* __restrict__ pSymbols, const short* __restrict__ pData,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchSrc, uint slicePitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * rowPitchSrc + z * slicePitchSrc;
+    uint indexDst = x + y * sizeX       + z * sizeX * sizeY;
+
+    pSymbols[indexDst] = symbolize(pData[indexSrc]);
+}
+
+__global__ void unsymbolizeKernel(
+    short* __restrict__ pData, const ushort* __restrict__ pSymbols,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchDst, uint slicePitchDst)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * sizeX       + z * sizeX * sizeY;
+    uint indexDst = x + y * rowPitchDst + z * slicePitchDst;
+
+    pData[indexDst] = unsymbolize(pSymbols[indexSrc]);
+}
+
+
+
+template<typename Symbol, EQuantizeType Q>
+__global__ void quantizeToSymbolsKernel(
+    Symbol* __restrict__ pSymbols, const float* __restrict__ pData,
+    float quantizationStepInv,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchSrc, uint slicePitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * rowPitchSrc + z * slicePitchSrc;
+    uint indexDst = x + y * sizeX       + z * sizeX * sizeY;
+
+    pSymbols[indexDst] = Symbol(quantizeToSymbol<Q>(pData[indexSrc], quantizationStepInv));
+}
+
+template<typename Symbol, EQuantizeType Q>
+__global__ void quantizeToSymbolsRoundtripKernel(
+    Symbol* __restrict__ pSymbols, float* __restrict__ pData,
+    float quantizationStep, float quantizationStepInv,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchSrc, uint slicePitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * rowPitchSrc + z * slicePitchSrc;
+    uint indexDst = x + y * sizeX       + z * sizeX * sizeY;
+
+    int quant = quantize<Q>(pData[indexSrc], quantizationStepInv);
+    pSymbols[indexDst] = Symbol(symbolize(quant));
+    pData[indexSrc] = unquantize<Q>(quant, quantizationStep);
+}
+
+template<typename Symbol, EQuantizeType Q>
+__global__ void unquantizeFromSymbolsKernel(
+    float* __restrict__ pData, const Symbol* __restrict__ pSymbols,
+    float quantizationStep,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchDst, uint slicePitchDst)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * sizeX       + z * sizeX * sizeY;
+    uint indexDst = x + y * rowPitchDst + z * slicePitchDst;
+
+    pData[indexDst] = unquantizeFromSymbol<Q>(pSymbols[indexSrc], quantizationStep);
+}
+
+
+template<EQuantizeType Q>
+__global__ void quantizeToShortKernel(
+    short* __restrict__ pQuant, const float* __restrict__ pData,
+    float quantizationStepInv,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchSrc, uint slicePitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * rowPitchSrc + z * slicePitchSrc;
+    uint indexDst = x + y * sizeX       + z * sizeX * sizeY;
+
+    pQuant[indexDst] = quantize<Q>(pData[indexSrc], quantizationStepInv);
+}
+
+template<EQuantizeType Q>
+__global__ void unquantizeFromShortKernel(
+    float* __restrict__ pData, const short* __restrict__ pQuant,
+    float quantizationStep,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchDst, uint slicePitchDst)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint indexSrc = x + y * sizeX       + z * sizeX * sizeY;
+    uint indexDst = x + y * rowPitchDst + z * slicePitchDst;
+
+    pData[indexDst] = unquantize<Q>(pQuant[indexSrc], quantizationStep);
+}
+
+
+template<EQuantizeType Q>
+__global__ void quantizeToShortByMapKernel(
+    short* __restrict__ pQuant, const float* __restrict__ pData,
+    const float* __restrict__ pQuantMap, uint quantMapCellSize, float qualityFactor,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchSrc, uint slicePitchSrc,
+    uint rowPitchQuant, uint slicePitchQuant)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint quantX = x / quantMapCellSize;
+    uint quantY = y / quantMapCellSize;
+    uint quantZ = z / quantMapCellSize;
+
+    uint indexSrc = x + y * rowPitchSrc + z * slicePitchSrc;
+    uint indexDst = x + y * sizeX       + z * sizeX * sizeY;
+    uint indexQuant = quantX + quantY * rowPitchQuant + quantZ * slicePitchQuant;
+
+    pQuant[indexDst] = quantize<Q>(pData[indexSrc], qualityFactor / pQuantMap[indexQuant]);
+}
+
+template<EQuantizeType Q>
+__global__ void unquantizeFromShortByMapKernel(
+    float* __restrict__ pData, const short* __restrict__ pQuant,
+    const float* __restrict__ pQuantMap, uint quantMapCellSize, float qualityFactor,
+    uint sizeX, uint sizeY, uint sizeZ,
+    uint rowPitchDst, uint slicePitchDst,
+    uint rowPitchQuant, uint slicePitchQuant)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint z = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if(x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    uint quantX = x / quantMapCellSize;
+    uint quantY = y / quantMapCellSize;
+    uint quantZ = z / quantMapCellSize;
+
+    uint indexSrc = x + y * sizeX       + z * sizeX * sizeY;
+    uint indexDst = x + y * rowPitchDst + z * slicePitchDst;
+    uint indexQuant = quantX + quantY * rowPitchQuant + quantZ * slicePitchQuant;
+
+    pData[indexDst] = unquantize<Q>(pQuant[indexSrc], pQuantMap[indexQuant] / qualityFactor);
+}
+
+
+
+
+template<EQuantizeType Q>
+__global__ void quantizeDifferenceToSymbols2Dkernel(ushort* __restrict__ pSymbols, const float* __restrict__ pData, float quantizationStepInv, const byte* __restrict__ pReference, uint stride, uint sizeX, uint sizeY, uint rowPitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(x >= sizeX || y >= sizeY) return;
+
+    uint indexSrc = x + y * rowPitchSrc;
+    uint indexDst = x + y * sizeX;
+    uint indexRef = indexDst * stride;
+
+    float ref = byteToFloat(pReference[indexRef]);
+    float val = pData[indexSrc] - ref;
+    pSymbols[indexDst] = quantizeToSymbol<Q>(val, quantizationStepInv);
+}
+
+template<EQuantizeType Q>
+__global__ void quantizeDifferenceToSymbolsRoundtrip2Dkernel(ushort* __restrict__ pSymbols, float* __restrict__ pData, float quantizationStep, float quantizationStepInv, const byte* __restrict__ pReference, uint stride, uint sizeX, uint sizeY, uint rowPitchSrc)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(x >= sizeX || y >= sizeY) return;
+
+    uint indexSrc = x + y * rowPitchSrc;
+    uint indexDst = x + y * sizeX;
+    uint indexRef = indexDst * stride;
+
+    float ref = byteToFloat(pReference[indexRef]);
+    float val = pData[indexSrc] - ref;
+    ushort symbol = quantizeToSymbol<Q>(val, quantizationStepInv);
+    pSymbols[indexDst] = symbol;
+
+    val = unquantizeFromSymbol<Q>(symbol, quantizationStep);
+    pData[indexSrc] = val + ref;
+}
+
+template<EQuantizeType Q>
+__global__ void unquantizeDifferenceFromSymbols2Dkernel(float* __restrict__ pData, const ushort* __restrict__ pSymbols, float quantizationStep, const byte* __restrict__ pReference, uint stride, uint sizeX, uint sizeY, uint rowPitchDst)
+{
+    uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(x >= sizeX || y >= sizeY) return;
+
+    uint indexSrc = x + y * sizeX;
+    uint indexDst = x + y * rowPitchDst;
+    uint indexRef = indexSrc * stride;
+
+    float val = unquantizeFromSymbol<Q>(pSymbols[indexSrc], quantizationStep);
+    float ref = byteToFloat(pReference[indexRef]);
+    pData[indexDst] = val + ref;
+}
+
+
+}
+
+}

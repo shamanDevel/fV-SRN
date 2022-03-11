@@ -1,0 +1,373 @@
+#include <cudaCompress/global.h>
+
+#include <cudaCompress/EncodeCommon.h>
+#include <cudaCompress/BitStreamGPU.cuh>
+
+
+#define WORDS_TO_LENGTH_THREADS_PER_BLOCK 192
+
+// For non shared memory atomic variant: Must be greater or equal than shared memory word size in bits
+#define COMPACTIFY_ELEM_PER_THREAD 8
+
+// For non shared memory atomic variant: Must be less or equal than shared memory word size in bits
+#define COMPACTIFY_THREADS_PER_BLOCK 96
+
+#define COMPACTIFY_INPUT_WORDS_PER_THREAD (COMPACTIFY_ELEM_PER_THREAD * sizeof(Symbol) / sizeof(uint))
+#define COMPACTIFY_OUTPUT_WORDS_PER_THREAD COMPACTIFY_ELEM_PER_THREAD
+
+#define COMPACTIFY_NUM_SMEM_SYMBOLS (COMPACTIFY_THREADS_PER_BLOCK * COMPACTIFY_ELEM_PER_THREAD)
+
+//NOT SAFE: #define COMPACTIFY_NUM_SMEM_WORDS (COMPACTIFY_THREADS_PER_BLOCK * COMPACTIFY_INPUT_WORDS_PER_THREAD)
+#define COMPACTIFY_NUM_SMEM_WORDS (COMPACTIFY_THREADS_PER_BLOCK * COMPACTIFY_OUTPUT_WORDS_PER_THREAD)
+
+#define WORD_BIT_LENGTH (8 * sizeof(uint))
+
+
+inline __host__ __device__ uint getPrefixCount(uint symbolCount) { return (symbolCount + COMPACTIFY_ELEM_PER_THREAD - 1) / COMPACTIFY_ELEM_PER_THREAD; }
+
+
+//////////////////////////////////////////////////////////////////////////////
+// Encode
+//////////////////////////////////////////////////////////////////////////////
+
+namespace cudaCompress {
+
+template<typename Symbol>
+__global__ void huffmanEncodeWordsToLengthKernel(uint** __restrict__ ppSymbolLengthStreams, const HuffmanGPUStreamInfo* __restrict__ pStreamInfos)
+{
+    uint symbolCount = pStreamInfos[blockIdx.y].symbolCount;
+    const Symbol* __restrict__ pSymbolStream = (Symbol*)pStreamInfos[blockIdx.y].dpSymbolStream;
+    const uint* __restrict__ pCodewordLengths = pStreamInfos[blockIdx.y].dpEncodeCodewordLengths;
+
+    __shared__ Symbol s_Symbols[WORDS_TO_LENGTH_THREADS_PER_BLOCK * COMPACTIFY_ELEM_PER_THREAD];
+
+    uint blockStartIndex = blockIdx.x * WORDS_TO_LENGTH_THREADS_PER_BLOCK;
+    uint readOffsetSharedToGlobal = blockStartIndex * COMPACTIFY_ELEM_PER_THREAD;
+
+    // load symbols into shared memory
+    #pragma unroll
+    for(uint i = 0; i < COMPACTIFY_ELEM_PER_THREAD; i++) {
+        uint sharedIndex = i * WORDS_TO_LENGTH_THREADS_PER_BLOCK + threadIdx.x;
+        uint symbolIndex = readOffsetSharedToGlobal + sharedIndex;
+        if(symbolIndex >= symbolCount) break;
+        s_Symbols[sharedIndex] = pSymbolStream[symbolIndex];
+    }
+    __syncthreads();
+
+    uint totalLength = 0;
+    uint stopIndex = max(symbolCount, readOffsetSharedToGlobal) - readOffsetSharedToGlobal;
+
+    // accumulate lengths of consecutive codewords
+    #pragma unroll
+    for(uint i = 0; i < COMPACTIFY_ELEM_PER_THREAD; i++) {
+        uint sharedIndex = threadIdx.x * COMPACTIFY_ELEM_PER_THREAD + i;
+        if(sharedIndex >= stopIndex) break;
+        Symbol s = s_Symbols[sharedIndex]; //TODO bank conflicts here? check!
+        totalLength += pCodewordLengths[s];
+    }
+    uint outIndex = blockStartIndex + threadIdx.x;
+    if(outIndex < getPrefixCount(symbolCount))
+        ppSymbolLengthStreams[blockIdx.y][outIndex] = totalLength;
+}
+
+__global__ void huffmanEncodeCopyScanTotalsKernel(const HuffmanGPUStreamInfo* __restrict__ pStreamInfos, uint streamCount, const uint** __restrict__ ppScan, uint* __restrict__ pScanTotal)
+{
+    uint index = blockIdx.x * blockDim.x + threadIdx.x;
+    if(index < streamCount) {
+        uint prefixCount = getPrefixCount(pStreamInfos[index].symbolCount);
+        pScanTotal[index] = ppScan[index][prefixCount];
+    }
+}
+
+__global__ void huffmanEncodeCollectOffsetsKernel(const HuffmanGPUStreamInfo* __restrict__ pStreamInfos, const uint** __restrict__ ppAllOffsets, uint codingBlockSize)
+{
+    uint offsetCount = (pStreamInfos[blockIdx.y].symbolCount + codingBlockSize - 1) / codingBlockSize;
+    uint index = blockIdx.x * blockDim.x + threadIdx.x;
+    if(index < offsetCount) {
+        uint interval = codingBlockSize / COMPACTIFY_ELEM_PER_THREAD;
+        pStreamInfos[blockIdx.y].dpOffsets[index] = ppAllOffsets[blockIdx.y][index * interval];
+    }
+}
+
+template<typename Symbol>
+__global__ void huffmanEncodeCompactifyKernel(const HuffmanGPUStreamInfo* __restrict__ pStreamInfos, const uint** __restrict__ ppSymbolBitIndexStreams)
+{
+    uint* __restrict__ pCodewordStream             = pStreamInfos[blockIdx.y].dpCodewordStream;
+    uint symbolCount                               = pStreamInfos[blockIdx.y].symbolCount;
+    const Symbol* __restrict__ pSymbolStream       = (Symbol*)pStreamInfos[blockIdx.y].dpSymbolStream;
+    const uint* __restrict__ pCodeWords            = pStreamInfos[blockIdx.y].dpEncodeCodewords;
+    const uint* __restrict__ pCodeWordLengths      = pStreamInfos[blockIdx.y].dpEncodeCodewordLengths;
+    const uint* __restrict__ pSymbolBitIndexStream = ppSymbolBitIndexStreams[blockIdx.y];
+
+    // Assume one shared memory word per uint
+    // Assume sizeof(int) is multiple of sizeof(Symbol)
+    __shared__ uint s_firstGlobalWordIndex; // First global memory word written by this block
+    __shared__ uint s_lastGlobalWordIndex; // Last global memory word written by this block
+    __shared__ Symbol s_symbolStream[COMPACTIFY_NUM_SMEM_SYMBOLS];
+    __shared__ uint s_codewordStream[COMPACTIFY_NUM_SMEM_WORDS];
+
+    // Input indices
+    uint sharedToGlobalOffset = blockIdx.x * blockDim.x * COMPACTIFY_ELEM_PER_THREAD;
+    uint symbolIndex = sharedToGlobalOffset + threadIdx.x * COMPACTIFY_ELEM_PER_THREAD; // Start: Inclusive
+    uint endSymbolIndex = symbolIndex + COMPACTIFY_ELEM_PER_THREAD; // End: Exclusive
+    endSymbolIndex = min(endSymbolIndex, symbolCount);
+
+    // Initialize shared memory (output) (writing 32-bit words)
+    #pragma unroll
+    for(uint i = 0; i < COMPACTIFY_OUTPUT_WORDS_PER_THREAD; i++) {
+        s_codewordStream[threadIdx.x + i * COMPACTIFY_THREADS_PER_BLOCK] = 0;
+    }
+    // read input from global to shared memory
+    static_assert(sizeof(uint) % sizeof(Symbol) == 0, "sizeof(uint) must be multiple of sizeof(Symbol)");
+    const uint symbolsPerWord = sizeof(uint) / sizeof(Symbol);
+    uint wordCount = (symbolCount + symbolsPerWord - 1) / symbolsPerWord;
+    #pragma unroll
+    for(uint i = 0; i < COMPACTIFY_INPUT_WORDS_PER_THREAD; i++) {
+        uint sharedIndex = i * COMPACTIFY_THREADS_PER_BLOCK + threadIdx.x;
+        uint globalIndex = sharedToGlobalOffset / symbolsPerWord + sharedIndex;
+        if(globalIndex >= wordCount) break;
+        ((uint*)s_symbolStream)[sharedIndex] = ((uint*)pSymbolStream)[globalIndex];
+    }
+    __syncthreads();
+
+    if(symbolIndex >= symbolCount) return;
+
+    // Output index
+    uint bitIndex = pSymbolBitIndexStream[symbolIndex / COMPACTIFY_ELEM_PER_THREAD]; // Global
+
+    if(threadIdx.x == 0) {
+        s_firstGlobalWordIndex = bitIndex / WORD_BIT_LENGTH;
+    }
+    __syncthreads();
+
+    bitIndex -= s_firstGlobalWordIndex * WORD_BIT_LENGTH; // Shared
+
+    // Compactify in shared memory
+    for(; symbolIndex < endSymbolIndex; symbolIndex++) {        
+        Symbol s = s_symbolStream[symbolIndex - sharedToGlobalOffset];//pSymbolStream[symbolIndex];
+        uint bitLength = pCodeWordLengths[s];
+        uint c = pCodeWords[s];
+
+        // First shared memory word written by this iteration
+        uint firstWordIndex = bitIndex / WORD_BIT_LENGTH;
+        char shift = ((char)WORD_BIT_LENGTH) - bitLength - bitIndex % WORD_BIT_LENGTH;
+        if(shift < 0) {
+            //s_codewordStream[firstWordIndex] |= c >> -shift;
+            //s_codewordStream[firstWordIndex + 1] |= c << (WORD_BIT_LENGTH + shift);
+            atomicOr(s_codewordStream + firstWordIndex, c >> -shift);
+            atomicOr(s_codewordStream + firstWordIndex + 1, c << (WORD_BIT_LENGTH + shift));
+        } else {
+            //s_codewordStream[firstWordIndex] |= c << shift;
+            atomicOr(s_codewordStream + firstWordIndex, c << shift);
+        }
+
+        bitIndex += bitLength;
+    }
+
+    if((threadIdx.x == COMPACTIFY_THREADS_PER_BLOCK - 1) || (endSymbolIndex == symbolCount)) {
+        s_lastGlobalWordIndex = s_firstGlobalWordIndex + (bitIndex - 1) / WORD_BIT_LENGTH;
+    }
+    __syncthreads();
+
+    uint sharedWordIndex = threadIdx.x * COMPACTIFY_ELEM_PER_THREAD;
+    
+    // First global word written by block
+    if(sharedWordIndex == 0) {
+        atomicOr(pCodewordStream + s_firstGlobalWordIndex, s_codewordStream[0]);
+        sharedWordIndex = 1;
+    }
+
+    uint globalWordIndex = s_firstGlobalWordIndex + sharedWordIndex; // inclusive
+    uint lastGlobalWordIndex = min(globalWordIndex + COMPACTIFY_ELEM_PER_THREAD, s_lastGlobalWordIndex); // exclusive
+    
+    // Write from shared to global memory
+    while(globalWordIndex < lastGlobalWordIndex) {
+        pCodewordStream[globalWordIndex++] = s_codewordStream[sharedWordIndex++];
+    }
+
+    // Last global word written by block
+    if(globalWordIndex == s_lastGlobalWordIndex) atomicOr(pCodewordStream + globalWordIndex, s_codewordStream[sharedWordIndex]);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Decode
+//////////////////////////////////////////////////////////////////////////////
+
+template<typename Symbol>
+__device__ inline void huffmanDecodeKernelImpl(const HuffmanGPUStreamInfo& streamInfo, uint codingBlockSize)
+{
+    __shared__ int s_codewordFirstIndexPerLength[MAX_CODEWORD_BITS];
+    __shared__ int s_codewordMinPerLength       [MAX_CODEWORD_BITS];
+    __shared__ int s_codewordMaxPerLength       [MAX_CODEWORD_BITS];
+
+    __shared__ int s_codewordLengthLookup[HUFFMAN_LOOKUP_SIZE];
+    __shared__ int s_codewordIndexLookup [HUFFMAN_LOOKUP_SIZE];
+
+    uint thread = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(streamInfo.decodeSymbolTableSize > 1) {
+        // load codeword indices and min/max into shared memory
+        //assert(blockDim.x >= MAX_CODEWORD_BITS, "blockDim.x must be >= MAX_CODEWORD_BITS");
+        if(threadIdx.x < MAX_CODEWORD_BITS) {
+            const int* __restrict__ pDecodeTableInt = (const int*)streamInfo.dpDecodeTable;
+            s_codewordFirstIndexPerLength[threadIdx.x] = pDecodeTableInt[threadIdx.x];
+            s_codewordMinPerLength       [threadIdx.x] = pDecodeTableInt[threadIdx.x + MAX_CODEWORD_BITS];
+            s_codewordMaxPerLength       [threadIdx.x] = pDecodeTableInt[threadIdx.x + 2 * MAX_CODEWORD_BITS];
+        }
+        __syncthreads();
+
+        // build lookup table for codewords of length <= LOG2_HUFFMAN_LOOKUP_SIZE
+        //assert(blockDim.x >= HUFFMAN_LOOKUP_SIZE, "blockDim.x must be >= HUFFMAN_LOOKUP_SIZE");
+        if(threadIdx.x < HUFFMAN_LOOKUP_SIZE) {
+            int len = 1;
+            int mask = 1 << (LOG2_HUFFMAN_LOOKUP_SIZE - 1);
+            int codeword;
+            //#pragma unroll LOG2_HUFFMAN_LOOKUP_SIZE
+            while(len <= LOG2_HUFFMAN_LOOKUP_SIZE) {
+                codeword = ((threadIdx.x & mask) >> (LOG2_HUFFMAN_LOOKUP_SIZE - len));
+                int codewordMax = s_codewordMaxPerLength[len-1];
+                if(codeword <= codewordMax) break;
+                mask = (mask >> 1) | (1 << (LOG2_HUFFMAN_LOOKUP_SIZE - 1));
+                len++;
+            }
+            if(len <= LOG2_HUFFMAN_LOOKUP_SIZE) {
+                s_codewordLengthLookup[threadIdx.x] = len;
+                s_codewordIndexLookup [threadIdx.x] = s_codewordFirstIndexPerLength[len-1] + codeword - s_codewordMinPerLength[len-1];
+            } else {
+                s_codewordLengthLookup[threadIdx.x] = 0;
+                s_codewordIndexLookup [threadIdx.x] = 0;
+            }
+        }
+        __syncthreads();
+
+        uint readOffset = thread * codingBlockSize;
+        if(readOffset >= streamInfo.symbolCount)
+            return;
+
+        const uint* __restrict__ pCodewordStream = (const uint*)streamInfo.dpCodewordStream;
+        uint offset = streamInfo.dpOffsets[thread];
+        BitStreamGPU codewordBitStream(pCodewordStream, offset);
+
+        int symbolsToDecode = min(readOffset + codingBlockSize, streamInfo.symbolCount) - readOffset;
+        // setup for interleaved output
+        uint warp = thread / WARP_SIZE;
+        uint threadWithinWarp = thread % WARP_SIZE;
+        uint writeIndex = warp * WARP_SIZE * codingBlockSize + threadWithinWarp;
+
+        Symbol* __restrict__ pSymbolStream = (Symbol*)streamInfo.dpSymbolStream;
+        const Symbol* __restrict__ pSymbolTable = (const Symbol*)(streamInfo.dpDecodeTable + 3 * MAX_CODEWORD_BITS * sizeof(int));
+        for(int i = 0; i < symbolsToDecode; i++) {
+            // get next uint in bitstream if necessary
+            codewordBitStream.fillCache();
+
+            // try lookup table
+            uint codeword = codewordBitStream.peekUInt();
+            uint codewordLength = s_codewordLengthLookup[codeword >> (32u - LOG2_HUFFMAN_LOOKUP_SIZE)];
+
+            uint codewordIndex;
+            if(codewordLength != 0) {
+                // lookup successful
+                codeword >>= (32u - LOG2_HUFFMAN_LOOKUP_SIZE);
+                codewordIndex = s_codewordIndexLookup[codeword];
+            } else {
+                // lookup unsuccessful, codeword is longer than LOG2_HUFFMAN_LOOKUP_SIZE
+                codewordLength = LOG2_HUFFMAN_LOOKUP_SIZE + 1u;
+                // find length of codeword
+                while(int(codeword >> (32u - codewordLength)) > s_codewordMaxPerLength[codewordLength - 1u]) {
+                    codewordLength++;
+                    //assert(codewordLength < sizeof(int) * 8);
+                }
+                codeword >>= (32u - codewordLength);
+
+                codewordIndex = s_codewordFirstIndexPerLength[codewordLength - 1u] + int(codeword) - s_codewordMinPerLength[codewordLength - 1u];
+            }
+            codewordBitStream.stepBits(codewordLength);
+
+            // output in interleaved order (-> coalesced)
+            pSymbolStream[writeIndex] = pSymbolTable[codewordIndex];
+            writeIndex += WARP_SIZE;
+        }
+    } else {
+        // single-symbol case
+        uint readOffset = thread * codingBlockSize;
+        if(readOffset >= streamInfo.symbolCount)
+            return;
+
+        const Symbol* __restrict__ pSymbolTable = (const Symbol*)(streamInfo.dpDecodeTable + 3 * MAX_CODEWORD_BITS * sizeof(int));
+        const Symbol symbol = *pSymbolTable;
+
+        int symbolsToDecode = min(readOffset + codingBlockSize, streamInfo.symbolCount) - readOffset;
+
+        uint warp = thread / WARP_SIZE;
+        uint threadWithinWarp = thread % WARP_SIZE;
+        uint writeIndex = warp * WARP_SIZE * codingBlockSize + threadWithinWarp;
+
+        Symbol* __restrict__ pSymbolStream = (Symbol*)streamInfo.dpSymbolStream;
+        for(int i = 0; i < symbolsToDecode; i++) {
+            pSymbolStream[writeIndex] = symbol;
+            writeIndex += WARP_SIZE;
+        }
+    }
+}
+
+template<typename Symbol>
+__global__ void huffmanDecodeKernel(const HuffmanGPUStreamInfo* __restrict__ pStreamInfos, uint codingBlockSize)
+{
+    huffmanDecodeKernelImpl<Symbol>(pStreamInfos[blockIdx.y], codingBlockSize);
+}
+
+
+#define TRANSPOSE_BLOCKDIM_X WARP_SIZE
+#define TRANSPOSE_BLOCKDIM_Y 8
+
+// HACK: this kernel assumes that the (padded) length of pSymbolStream is a multiple of WARP_SIZE*codingBlockSize
+// TODO: load/store 4-byte elements to/from global memory!
+template<typename Symbol, uint codingBlockSize>
+__device__ inline void huffmanDecodeTransposeKernelImpl(Symbol* __restrict__ pSymbolStream)
+{
+    // assert(blockDim.x == WARP_SIZE)
+    // assert(codingBlockSize % blockDim.x == 0)
+
+    // "+2" padding instead of "+1" because of 2-byte elements vs 4-byte bank size!
+    __shared__ Symbol s_block[WARP_SIZE][codingBlockSize + 2];
+
+    pSymbolStream += blockIdx.x * codingBlockSize * WARP_SIZE;
+
+    // load into shared memory and transpose
+    // each thread fills one row of the smem buffer
+    #pragma unroll
+    for(uint col = threadIdx.y; col < codingBlockSize; col += TRANSPOSE_BLOCKDIM_Y) {
+        uint index = threadIdx.x + col * WARP_SIZE;
+        s_block[threadIdx.x][col] = pSymbolStream[index];
+    }
+    __syncthreads();
+
+    //// write out (per Symbol - usually 2-byte elements)
+    //for(uint col = threadIdx.x; col < codingBlockSize; col += TRANSPOSE_BLOCKDIM_X) {
+    //    #pragma unroll
+    //    for(uint row = threadIdx.y; row < WARP_SIZE; row += TRANSPOSE_BLOCKDIM_Y) {
+    //        uint index = row * codingBlockSize + col;
+    //        pSymbolStream[index] = s_block[row][col];
+    //    }
+    //}
+
+    // write out (4-byte elements)
+    static_assert(sizeof(uint) % sizeof(Symbol) == 0, "sizeof(uint) must be multiple of sizeof(Symbol)");
+    uint factor = sizeof(uint) / sizeof(Symbol);
+    for(uint col = factor * threadIdx.x; col < codingBlockSize; col += factor * TRANSPOSE_BLOCKDIM_X) {
+        #pragma unroll
+        for(uint row = threadIdx.y; row < WARP_SIZE; row += TRANSPOSE_BLOCKDIM_Y) {
+            uint index = row * codingBlockSize + col;
+            *(uint*)(pSymbolStream + index) = *(uint*)(s_block[row] + col);
+        }
+    }
+}
+
+template<typename Symbol, uint codingBlockSize>
+__global__ void huffmanDecodeTransposeKernel(const HuffmanGPUStreamInfo* pStreamInfos)
+{
+    Symbol* pSymbolStream = (Symbol*)pStreamInfos[blockIdx.y].dpSymbolStream;
+    huffmanDecodeTransposeKernelImpl<Symbol, codingBlockSize>(pSymbolStream);
+}
+
+}

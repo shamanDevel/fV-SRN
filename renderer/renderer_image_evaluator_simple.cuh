@@ -106,7 +106,8 @@ __global__ void ImageEvaluatorSimpleKernel(
 		//write output, but first normalize
 		out.depth /= out.color.w;
 		out.color /= samples;
-		out.normal = normalize(out.normal);
+		out.normal /= samples;
+		//out.normal = safeNormalize(out.normal);
 
 		//mix with background
 #ifdef IMAGE_EVALUATOR__HAS_BACKGROUND_IMAGE

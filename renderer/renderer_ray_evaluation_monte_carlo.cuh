@@ -83,27 +83,45 @@ namespace kernel
 			const real_t densityMin = rayEvaluationMonteCarloParameters.densityMin;
 			const real_t densityMax = rayEvaluationMonteCarloParameters.densityMax;
 			const real_t divDensityRange = real_t(1) / (densityMax - densityMin);
-			
+
+			real_t tout = 0;
 			real_t tcurrent = 0;
+			bool isValid = true;
 			while (true) {
 				//sample in homogeneous medium
 				real_t negStepsize = rlog(sampler.sampleUniform()) * divMaxAbsorption;
 				tcurrent -= negStepsize;
+
 				//evaluate current density
 				real3 position = rayStart + rayDir * tcurrent;
-				const auto [density, isInside] = volume.eval<real_t>(position, rayDir, batch);
-				if (!isInside) {
+				const auto resultFromForward = volume.eval<real_t>(position, rayDir, batch);
+				const auto density = resultFromForward.value;
+				const bool isInside = resultFromForward.isInside;
+				if (isValid && !isInside) {
 					hitPosition = position;
-					return 0;
+					tout = 0;
+					isValid = false;
 				}
-				if (density >= densityMin)
+
+				//compute normal
+				real3 normal = make_real3(0);
+				const int requireNormal = isValid && density >= densityMin;
+#if KERNEL_SYNCHRONIZED_TRACING==0
+				if (requireNormal)
+					normal = volume.evalNormal(position, rayDir, resultFromForward, batch);
+#else
+				//evaluate normal if *any* thread requests normals (TensorCores)
+				if (__any_sync(0xffffffff, requireNormal))
+					normal = volume.evalNormal(position, rayDir, resultFromForward, batch);
+#endif
+
+				if (requireNormal)
 				{
 					auto density2 = (density - densityMin) * divDensityRange;
 
 					//evaluate TF
 					VolumeInterpolation_t::density_t previousDensity = { 0 };
-					auto n = volume.evalNormal(position, rayDir, batch);
-					auto color1 = tf.eval(density2, n, previousDensity, 1, batch);
+					auto color1 = tf.eval(density2, normal, previousDensity, 1, batch);
 					auto currentAbsorption = color1.w;
 
 					//if (threadIdx.x == 0 && blockIdx.x == 0)
@@ -116,11 +134,21 @@ namespace kernel
 						//real particle
 						hitPosition = position;
 						hitColorFromTf = color1;
-						hitNormal = n;
-						return tcurrent;
+						hitNormal = normal;
+						tout = tcurrent;
+						isValid = false;
 					}
 				}
+#if KERNEL_SYNCHRONIZED_TRACING==0
+				if (!isValid) break;
+#else
+				//break only if all threads in the warp are done
+				if (!__any_sync(0xffffffff, isValid))
+					break;
+#endif
 			}
+
+			return tout;
 		}
 		
 		/**
@@ -194,6 +222,7 @@ namespace kernel
 			real_t outDepth = 0;
 			real3 outNormal = make_real3(0);
 			real3 position = rayStart + tmin * rayDir;
+			bool isValid = true;
 			for (int bounces = 0; bounces <= numBounces; ++bounces)
 			{
 				//find next intersection
@@ -202,24 +231,33 @@ namespace kernel
 				real3 normal;
 				float thit = deltaTracking(position, rayDir, batch,
 					sampler, nextPosition, tfColor, normal);
-				if (bounces == 0)
+				if (isValid && bounces == 0)
 				{
 					outAlpha = thit > 0;
 					outDepth = thit;
 					outNormal = normal;
 				}
-				if (thit > 0)
+
+#if KERNEL_SYNCHRONIZED_TRACING==0
+				bool any_hit = thit > 0;
+#else
+				bool any_hit = __any_sync(0xffffffff, thit > 0);
+#endif
+
+				if (any_hit)
 				{
-					if (bounces==0 && thit+tmin>tmax)
-					{
-						//background hit
-						outAlpha = 0;
-						emission = make_real3(0, 0, 0);
-						break;
-					}
+					// NOT NEEDED
+					//if (thit > 0 && isValid && bounces==0 && thit+tmin>tmax)
+					//{
+					//	//background hit
+					//	outAlpha = 0;
+					//	emission = make_real3(0, 0, 0);
+					//	isValid = false;
+					//}
 
 					//medium intersection
-					beta *= make_real3(tfColor) * (tfColor.w * colorScaling);
+					if (thit>0)
+					    beta *= make_real3(tfColor) * (tfColor.w * colorScaling);
 					
 					//1. direct illumination
 					real3 hitPosition;
@@ -230,28 +268,44 @@ namespace kernel
 					real_t p = phase.prob(rayDir, lightDir, nextPosition, batch);
 					if (deltaTracking(nextPosition, lightDir, batch, sampler, hitPosition, hitColor, hitNormal) <= 0)
 					{
-						real_t I = rayEvaluationMonteCarloParameters.lightIntensity;
-						emission += beta * make_real3(p * I);
+						if (thit > 0 && isValid) {
+							real_t I = rayEvaluationMonteCarloParameters.lightIntensity;
+							emission += beta * make_real3(p * I);
+						}
 					}
 					
 					//2. next ray
-					real3 nextDir = phase.sample(rayDir, nextPosition, sampler, batch);
-					beta *= phase.prob(rayDir, nextDir, nextPosition, batch);
-					position = nextPosition;
-					rayDir = nextDir;
+					if (thit > 0 && isValid) {
+						real3 nextDir = phase.sample(rayDir, nextPosition, sampler, batch);
+						beta *= phase.prob(rayDir, nextDir, nextPosition, batch);
+						position = nextPosition;
+						rayDir = nextDir;
+					}
 				}
-				else
-				{
-					//background
-					real4 c = evalBackground(position, rayDir, batch, sampler).color;
-#ifdef RAY_EVALUATION_MONTE_CARLO__HIDE_LIGHT
-					if (bounces > 0) emission += beta * make_real3(c);
+				if (isValid && thit <= 0)
+					isValid = false;
+//				else
+//				{
+//					//background
+//					if (isValid) {
+//						real4 c = evalBackground(position, rayDir, batch, sampler).color;
+//#ifdef RAY_EVALUATION_MONTE_CARLO__HIDE_LIGHT
+//						if (bounces > 0) emission += beta * make_real3(c);
+//#else
+//						emission += beta * make_real3(c);
+//						if (bounces == 0) outAlpha = c.w;
+//#endif
+//						isValid = false;
+//					}
+//				}
+
+#if KERNEL_SYNCHRONIZED_TRACING==0
+				if (!isValid) break;
 #else
-					emission += beta * make_real3(c);
-					if (bounces == 0) outAlpha = c.w;
-#endif
+				//break early only if all threads in the warp are done
+				if (!__any_sync(0xffffffff, isValid))
 					break;
-				}
+#endif
 			}
 			
 			return RayEvaluationOutput{

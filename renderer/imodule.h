@@ -328,6 +328,10 @@ public:
 
 		// Transfer Function -> Volume Interpolation
 		bool volumeShouldProvideNormals = false;
+		// Transfer Function -> Volume Interpolation
+		// The VolumeInterpolation should be prepared to be asked
+		// to provide the first and second principal curvatures.
+		bool volumeShouldProvideCurvature = false;
 		// Ray Evaluation -> Volume Interpolation
 		// True: position is in object space [0,resX]x[0,resY]x[0,resY]
 		// False: position in world space [boxMinX, boxMaxX]x...
@@ -376,6 +380,11 @@ public:
 	 * The list of filenames to include
 	 */
 	[[nodiscard]] virtual std::vector<std::string> getIncludeFileNames(const GlobalSettings& s) const = 0;
+	/**
+	 * Allows the kernel module to insert arbitrary code (code generation).
+	 * This code is inserted before the include files
+	 */
+	virtual void fillExtraSourceCode(const GlobalSettings& s, std::stringstream& ss) const {}
 	/**
 	 * the name of the __constant__ memory declaration with the parameters.
 	 * If an empty string is returned, no constant memory is declared

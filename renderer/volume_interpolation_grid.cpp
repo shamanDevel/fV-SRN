@@ -23,7 +23,8 @@ const std::string renderer::VolumeInterpolationGrid::Feature2DensityNames[] = {
 	/* VelocityY         */ " - Y",
 	/* VelocityZ         */ " - Z",
 	/* VelocityMagnitude */ " - mag",
-	/* Density           */ " - density"
+	/* Density           */ " - density",
+	/* DensityCurvature  */ " - density+curvature"
 };
 //The datatype of the 3D texture / texture sampler in renderer_volume_grid
 const std::string renderer::VolumeInterpolationGrid::Feature2DensityTextureType[] = {
@@ -32,7 +33,8 @@ const std::string renderer::VolumeInterpolationGrid::Feature2DensityTextureType[
 	/* VelocityY         */ "float4",
 	/* VelocityZ         */ "float4",
 	/* VelocityMagnitude */ "float4",
-	/* Density           */ "float4"
+	/* Density           */ "float4",
+	/* DensityCurvature  */ "float4"
 };
 //The name of the function to extract the scalar data
 const std::string renderer::VolumeInterpolationGrid::Feature2DensityTextureChannel[] = {
@@ -41,7 +43,8 @@ const std::string renderer::VolumeInterpolationGrid::Feature2DensityTextureChann
 	/* VelocityY         */ "getY",
 	/* VelocityZ         */ "getZ",
 	/* VelocityMagnitude */ "getMagnitude",
-	/* Density           */ "getW"
+	/* Density           */ "getW",
+	/* DensityCurvature  */ "getColor" //I want all
 };
 
 renderer::VolumeInterpolationGrid::VolumeInterpolationGrid()
@@ -84,6 +87,7 @@ bool renderer::VolumeInterpolationGrid::extractDensityFeaturesFromVolume()
 			availableDensityFeatures_.push_back({ i, Feature2Density::VelocityY });
 			availableDensityFeatures_.push_back({ i, Feature2Density::VelocityZ });
 			availableDensityFeatures_.push_back({ i, Feature2Density::VelocityMagnitude });
+			availableDensityFeatures_.push_back({ i, Feature2Density::DensityCurvature });
 		}
 		else
 		{
@@ -350,6 +354,13 @@ bool renderer::VolumeInterpolationGrid::drawUI(UIStorage_t& storage)
 		loadVolumeDialog();
 		changed = true;
 	}
+	ImGui::SameLine();
+	if (ImGui::ButtonEx("Reload##VolumeInterpolationGrid", ImVec2(0,0), 
+		source_==VolumeSource::VOLUME && !volumeFullFilename_.empty() ? 0 : ImGuiButtonFlags_Disabled))
+	{
+		loadVolumeFromPath(volumeFullFilename_.string());
+		changed = true;
+	}
 
 	if (source_ == VolumeSource::EMPTY)
 	{
@@ -505,22 +516,26 @@ void renderer::VolumeInterpolationGrid::loadVolumeDialog()
 	auto results = pfd::open_file(
 		"Load volume",
 		volumeDirectory,
-		{ "Volumes", "*.dat *.xyz *.cvol *.json"},
+		{ "Volumes", "*.dat *.xyz *.cvol *.json" },
 		false
 	).result();
 	if (results.empty())
 		return;
 	std::string fileNameStr = results[0];
 
-	std::cout << "Load " << fileNameStr << std::endl;
-	auto fileNamePath = std::filesystem::path(fileNameStr);
 	ImGui::MarkIniSettingsDirty();
 	ImGui::SaveIniSettingsToDisk(GImGui->IO.IniFilename);
+	loadVolumeFromPath(fileNameStr);
+}
 
+void renderer::VolumeInterpolationGrid::loadVolumeFromPath(const std::string& filename)
+{
+	std::cout << "Load " << filename << std::endl;
+	auto fileNamePath = std::filesystem::path(filename);
 	if (fileNamePath.extension() == ".json")
 	{
 	    //load ensemble
-		loadEnsemble(fileNameStr, nullptr);
+		loadEnsemble(filename, nullptr);
 		newVolumeLoaded_ = true;
 		return;
 	}
@@ -539,9 +554,9 @@ void renderer::VolumeInterpolationGrid::loadVolumeDialog()
 	};
 	this->backgroundGui_ = guiTask;
 	ImGui::OpenPopup("Load Volume");
-	auto loaderTask = [fileNameStr, progress, this](BackgroundWorker* worker)
+	auto loaderTask = [filename, progress, this](BackgroundWorker* worker)
 	{
-		loadVolume(fileNameStr, progress.get());
+		loadVolume(filename, progress.get());
 
 		//set it in the GUI and close popup
 		this->backgroundGui_ = {};
@@ -777,6 +792,11 @@ std::optional<int> renderer::VolumeInterpolationGrid::getBatches(const GlobalSet
 
 std::string renderer::VolumeInterpolationGrid::getDefines(const GlobalSettings& s) const
 {
+	if (s.volumeShouldProvideCurvature && !s.volumeShouldProvideNormals)
+	{
+		throw std::runtime_error("Curvature estimation requested, but this requires also normals, which are deactivated");
+	}
+
 	std::stringstream ss;
 	if (s.volumeShouldProvideNormals)
 		ss << "#define VOLUME_INTERPOLATION_GRID__REQUIRES_NORMAL\n";
@@ -784,9 +804,9 @@ std::string renderer::VolumeInterpolationGrid::getDefines(const GlobalSettings& 
 	if (source_ == VolumeSource::TORCH_TENSOR) {
 		ss << "#define VOLUME_INTERPOLATION_GRID__USE_TENSOR\n";
 		if (tensor_.value.dtype() == c10::kDouble)
-			ss << "#VOLUME_INTERPOLATION_GRID__TENSOR_TYPE double\n";
+			ss << "#define VOLUME_INTERPOLATION_GRID__TENSOR_TYPE double\n";
 		else
-			ss << "#VOLUME_INTERPOLATION_GRID__TENSOR_TYPE float\n";
+			ss << "#define VOLUME_INTERPOLATION_GRID__TENSOR_TYPE float\n";
 	}
 
 	switch (interpolation_)
@@ -813,6 +833,10 @@ std::string renderer::VolumeInterpolationGrid::getDefines(const GlobalSettings& 
 			const auto feature = availableDensityFeatures_[selectedDensityFeatureIndex_];
 			ss << "#define VOLUME_INTERPOLATION_GRID__TEXTURE_TYPE " << Feature2DensityTextureType[int(feature.mapping)] << "\n";
 			ss << "#define VOLUME_INTERPOLATION_GRID__TEXTURE_EXTRACTOR " << Feature2DensityTextureChannel[int(feature.mapping)] << "\n";
+		    if (feature.mapping==Feature2Density::DensityCurvature)
+		    {
+				ss << "#define VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID\n";
+		    }
 			break;
 		    }
 		case GlobalSettings::Velocity:
@@ -895,8 +919,9 @@ void renderer::VolumeInterpolationGrid::fillConstantMemory(
 			p.resolutionMinusOne = objectResolution - make_int3(1);
 			p.boxMin = kernel::cast3<scalar_t>(boxMin());
 			p.boxSize = kernel::cast3<scalar_t>(boxSize());
-			double3 voxelSize = boxSize() / make_double3(objectResolution);
-			p.normalScale = kernel::cast3<scalar_t>(1.0 / voxelSize);
+			double3 voxelSize = boxSize() / make_double3(
+				objectResolution + make_int3(isGridResolutionNewBehavior() ? 0 : -1));
+			p.normalScale = kernel::cast3<scalar_t>(0.5 / voxelSize); //central differences
 			double3 normalStep = make_double3(1);//make_double3(1.0) / make_double3(objectResolution());
 			p.normalStep = kernel::cast3<scalar_t>(normalStep);
 			CU_SAFE_CALL(cuMemcpyHtoDAsync(ptr, &p, sizeof(Parameters), stream));
@@ -952,8 +977,9 @@ void renderer::VolumeInterpolationGrid::fillConstantMemory(
 			p.resolutionMinusOne = objectResolution() - make_int3(1);
 			p.boxMin = kernel::cast3<scalar_t>(boxMin());
 			p.boxSize = kernel::cast3<scalar_t>(boxSize());
-			double3 voxelSize = boxSize() / make_double3(objectResolution());
-			p.normalScale = kernel::cast3<scalar_t>(1.0 / voxelSize);
+			double3 voxelSize = boxSize() / make_double3(
+				objectResolution() + make_int3(isGridResolutionNewBehavior() ? 0 : -1));
+			p.normalScale = kernel::cast3<scalar_t>(0.5 / voxelSize); //central differences
 			double3 normalStep = make_double3(1);//make_double3(1.0) / make_double3(objectResolution());
 			p.normalStep = kernel::cast3<scalar_t>(normalStep);
 			CU_SAFE_CALL(cuMemcpyHtoDAsync(ptr, &p, sizeof(Parameters), stream));

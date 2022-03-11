@@ -75,6 +75,14 @@ public:
 	void reloadCudaKernels();
 	void cleanup();
 	void setDebugMode(bool debug);
+
+	/**
+	 * For unit tests, overwrite the enabled-flga verbose compiler outputs
+	 * on compilation.
+	 * Default without override: log on compiling new kernels, no log on loading kernels.
+	 */
+	void unittestOverrideVerboseCompilerLogs(bool log);
+	void unittestDisableVerboseCompilerLogOverride();
 	
 	/**
 	 * Function to load cuda sources.
@@ -163,6 +171,7 @@ private:
 	std::string customKernelCacheFile;
 
 	std::map<std::string, std::shared_ptr<KernelStorage>> kernelStorage;
+	std::optional<bool> overrideNoLog;
 };
 
 END_RENDERER_NAMESPACE

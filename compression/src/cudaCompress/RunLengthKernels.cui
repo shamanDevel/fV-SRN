@@ -1,0 +1,79 @@
+
+
+namespace cudaCompress {
+
+__global__ void runLengthEncodeGetValidSymbolIndices(const uint* __restrict__ pOutIndices, uint* __restrict__ pValidSymbolIndices, uint symbolCount)
+{
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < symbolCount; index += gridDim.x * blockDim.x) {
+        uint outIndex = pOutIndices[index];
+        uint outIndexRight = pOutIndices[index + 1];
+        if(outIndex != outIndexRight) {
+            pValidSymbolIndices[outIndex] = index;
+        }
+    }
+}
+
+__global__ void runLengthEncodeExtraZeroSymbolCountsKernel(const uint* __restrict__ pValidSymbolIndices, uint* __restrict__ pExtraZeroSymbolCounts, const uint* __restrict__ pSymbolCountCompact, uint zeroCountMax)
+{
+    uint symbolCountCompact = *pSymbolCountCompact;
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < symbolCountCompact; index += gridDim.x * blockDim.x) {
+        uint leftValue = (index == 0 ? 0 : (pValidSymbolIndices[index - 1] + 1));
+        uint zeroCount = pValidSymbolIndices[index] - leftValue;
+        pExtraZeroSymbolCounts[index] = zeroCount / (zeroCountMax + 1);
+    }
+}
+
+template<typename Symbol>
+__global__ void runLengthEncodeCompactKernel(const Symbol* __restrict__ pSymbols, const uint* __restrict__ pValidSymbolIndices, const uint* __restrict__ pWriteOffsets, Symbol* __restrict__ pSymbolsCompact, Symbol* __restrict__ pZeroCounts, uint symbolCountCompact, uint zeroCountMax)
+{
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < symbolCountCompact; index += gridDim.x * blockDim.x) {
+        uint writeOffset = pWriteOffsets[index + 1];
+        uint insertZeroCount = writeOffset - pWriteOffsets[index];
+        uint outputIndex = index + writeOffset;
+        // write additional zeros if necessary
+        //TODO is there a more efficient way?
+        for(uint i = 0; i < insertZeroCount; i++) {
+            pSymbolsCompact[outputIndex - insertZeroCount + i] = 0;
+            pZeroCounts    [outputIndex - insertZeroCount + i] = zeroCountMax;
+        }
+        // write actual symbol
+        uint inputIndex = pValidSymbolIndices[index];
+        uint leftValue = (index == 0 ? 0 : (pValidSymbolIndices[index - 1] + 1));
+        pSymbolsCompact[outputIndex] = pSymbols[inputIndex];
+        pZeroCounts    [outputIndex] = (inputIndex - leftValue) % (zeroCountMax + 1);
+    }
+}
+
+template<typename Symbol>
+__global__ void runLengthDecodeScatterKernel(const Symbol* __restrict__ pSymbolsCompact, const uint* __restrict__ pValidSymbolIndices, uint symbolCountCompact, Symbol* __restrict__ pSymbols)
+{
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < symbolCountCompact; index += gridDim.x * blockDim.x) {
+        uint outIndex = pValidSymbolIndices[index] + index;
+        pSymbols[outIndex] = pSymbolsCompact[index];
+    }
+}
+
+template<typename Symbol>
+__global__ void runLengthDecodeMultiScatterKernel(const Symbol* __restrict__ pSymbolsCompact, uint symbolsCompactStride, const uint* __restrict__ pValidSymbolIndices, uint validSymbolIndicesStride, const uint* pSymbolCountCompact, Symbol** __restrict__ ppSymbols)
+{
+    uint stream = blockIdx.y;
+    pSymbolsCompact += stream * symbolsCompactStride;
+    pValidSymbolIndices += stream * validSymbolIndicesStride;
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < pSymbolCountCompact[stream]; index += gridDim.x * blockDim.x) {
+        uint outIndex = pValidSymbolIndices[index] + index;
+        ppSymbols[stream][outIndex] = pSymbolsCompact[index];
+    }
+}
+
+template<typename Symbol>
+__global__ void runLengthDecodeMultiScatterKernel(const Symbol** __restrict__ ppSymbolsCompact, const uint* __restrict__ pValidSymbolIndices, uint validSymbolIndicesStride, const uint* pSymbolCountCompact, Symbol** __restrict__ ppSymbols)
+{
+    uint stream = blockIdx.y;
+    pValidSymbolIndices += stream * validSymbolIndicesStride;
+    for(uint index = blockIdx.x * blockDim.x + threadIdx.x; index < pSymbolCountCompact[stream]; index += gridDim.x * blockDim.x) {
+        uint outIndex = pValidSymbolIndices[index] + index;
+        ppSymbols[stream][outIndex] = ppSymbolsCompact[stream][index];
+    }
+}
+
+}

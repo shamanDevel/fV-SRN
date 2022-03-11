@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ray_evaluation.h"
+#include "image_evaluator_simple.h"
 //#include "brdf.h"
 #include "opengl_mesh.h"
 #include "opengl_shader.h"
@@ -59,6 +60,14 @@ public:
 
     bool hasRasterizing() const override;
     void performRasterization(const RasterizingContext* context) override;
+
+	static torch::Tensor SampleLight(IImageEvaluator_ptr context, int numSamples, unsigned int time, CUstream stream);
+	static torch::Tensor EvalBackground(IImageEvaluator_ptr context, const torch::Tensor& rayStart, const torch::Tensor& rayDir, unsigned int time, CUstream stream);
+	static std::tuple<torch::Tensor, torch::Tensor> NextDirection(
+		IImageEvaluator_ptr context,
+		const torch::Tensor& rayStart, const torch::Tensor& rayDir, unsigned int time, CUstream stream);
+	static torch::Tensor PhaseFunctionProbability(IImageEvaluator_ptr context, 
+		const torch::Tensor& dirIn, const torch::Tensor& dirOut, const torch::Tensor& position, CUstream stream);
 
 protected:
 	void registerPybindModule(pybind11::module& m) override;

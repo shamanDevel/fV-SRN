@@ -62,8 +62,9 @@ torch::Tensor renderer::IVolumeInterpolation::evaluate(
 		<< (s.synchronizedThreads ? 1 : 0)
 		<< "\n";
 	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
 	for (const auto& i : getIncludeFileNames(s))
-		extraSource << "#include \"" << i << "\"\n";
+		extraSource << "\n#include \"" << i << "\"\n";
 	extraSource << "#define VOLUME_INTERPOLATION_T " <<
 		getPerThreadType(s) << "\n";
 	extraSource << "#define OUTPUT_CHANNELS " << channels << "\n";
@@ -125,6 +126,239 @@ torch::Tensor renderer::IVolumeInterpolation::evaluate(
 	return densities;
 }
 
+std::tuple<torch::Tensor, torch::Tensor>
+    renderer::IVolumeInterpolation::evaluateWithGradient(
+	const torch::Tensor& positions, const torch::Tensor& direction, CUstream stream)
+{
+	if (outputType() != GlobalSettings::Density)
+	{
+		throw std::runtime_error("evaluateWithGradient can only be called for scalar volumes");
+	}
+
+	CHECK_CUDA(positions, true);
+	CHECK_DIM(positions, 2);
+	CHECK_SIZE(positions, 1, 3);
+	bool hasDirection = false;
+	if (direction.defined())
+	{
+		hasDirection = true;
+		CHECK_CUDA(direction, true);
+		CHECK_DIM(direction, 2);
+		CHECK_SIZE(direction, 1, 3);
+	}
+
+	GlobalSettings s{};
+	s.scalarType = positions.scalar_type();
+	s.volumeShouldProvideNormals = true;
+	s.interpolationInObjectSpace = false;
+	const auto oldBoxMax = boxMax();
+	const auto oldBoxMin = boxMin();
+	setBoxMin(make_double3(0, 0, 0));
+	setBoxMax(make_double3(1, 1, 1));
+	int channels = outputChannels();
+	assert(channels == 1); //should be caught above by the output type
+
+	//kernel
+	this->prepareRendering(s);
+	const std::string kernelName = "EvaluateNoBatchesWithGradient";
+	std::vector<std::string> constantNames;
+	if (const auto c = getConstantDeclarationName(s); !c.empty())
+		constantNames.push_back(c);
+	std::stringstream extraSource;
+	extraSource << "#define KERNEL_DOUBLE_PRECISION "
+		<< (s.scalarType == GlobalSettings::kDouble ? 1 : 0)
+		<< "\n";
+	extraSource << "#define KERNEL_SYNCHRONIZED_TRACING "
+		<< (s.synchronizedThreads ? 1 : 0)
+		<< "\n";
+	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
+	for (const auto& i : getIncludeFileNames(s))
+		extraSource << "\n#include \"" << i << "\"\n";
+	extraSource << "#define VOLUME_INTERPOLATION_T " <<
+		getPerThreadType(s) << "\n";
+	extraSource << "#define OUTPUT_CHANNELS " << channels << "\n";
+	extraSource << "#define VOLUME_USE_DIRECTION " << (hasDirection ? 1 : 0) << "\n";
+	extraSource << "#include \"renderer_volume_kernels4.cuh\"\n";
+	const auto fun0 = KernelLoader::Instance().getKernelFunction(
+		kernelName, extraSource.str(), constantNames, false, false);
+	if (!fun0.has_value())
+		throw std::runtime_error("Unable to compile kernel");
+	const auto fun = fun0.value();
+	if (auto c = getConstantDeclarationName(s); !c.empty())
+	{
+		CUdeviceptr ptr = fun.constant(c);
+		fillConstantMemory(s, ptr, stream);
+	}
+
+	//output tensors
+	int batches = positions.size(0);
+	auto densities = torch::empty({ batches, channels },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+	auto gradients = torch::empty({ batches, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	//launch kernel
+	int blockSize;
+	if (s.fixedBlockSize > 0)
+	{
+		if (s.fixedBlockSize > fun.bestBlockSize())
+			throw std::runtime_error("larger block size requested that can be fullfilled");
+		blockSize = s.fixedBlockSize;
+	}
+	else
+	{
+		blockSize = fun.bestBlockSize();
+	}
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(batches, blockSize)),
+		fun.minGridSize());
+	dim3 virtual_size{
+		static_cast<unsigned int>(batches), 1, 1 };
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "IVolumeInterpolation::evaluate", [&]()
+		{
+			const auto accPosition = accessor< ::kernel::Tensor2Read<scalar_t>>(positions);
+			const auto accDirection = hasDirection
+				? accessor< ::kernel::Tensor2Read<scalar_t>>(direction)
+				: ::kernel::Tensor2Read<scalar_t>();
+			const auto accDensity = accessor< ::kernel::Tensor2RW<scalar_t>>(densities);
+			const auto accGradient = accessor< ::kernel::Tensor2RW<scalar_t>>(gradients);
+			const void* args[] = { &virtual_size, &accPosition, &accDirection, &accDensity, &accGradient };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+
+	setBoxMin(oldBoxMin);
+	setBoxMax(oldBoxMax);
+
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return std::make_tuple(densities, gradients);
+}
+
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+renderer::IVolumeInterpolation::evaluateWithGradientAndCurvature(
+	const torch::Tensor& positions, const torch::Tensor& direction, CUstream stream)
+{
+	if (outputType() != GlobalSettings::Density)
+	{
+		throw std::runtime_error("evaluateWithGradient can only be called for scalar volumes");
+	}
+
+	CHECK_CUDA(positions, true);
+	CHECK_DIM(positions, 2);
+	CHECK_SIZE(positions, 1, 3);
+	bool hasDirection = false;
+	if (direction.defined())
+	{
+		hasDirection = true;
+		CHECK_CUDA(direction, true);
+		CHECK_DIM(direction, 2);
+		CHECK_SIZE(direction, 1, 3);
+	}
+
+	GlobalSettings s{};
+	s.scalarType = positions.scalar_type();
+	s.volumeShouldProvideNormals = true;
+	s.volumeShouldProvideCurvature = true;
+	s.interpolationInObjectSpace = false;
+	const auto oldBoxMax = boxMax();
+	const auto oldBoxMin = boxMin();
+	setBoxMin(make_double3(0, 0, 0));
+	setBoxMax(make_double3(1, 1, 1));
+	int channels = outputChannels();
+	assert(channels == 1); //should be caught above by the output type
+
+	//kernel
+	this->prepareRendering(s);
+	const std::string kernelName = "EvaluateNoBatchesWithGradientAndCurvature";
+	std::vector<std::string> constantNames;
+	if (const auto c = getConstantDeclarationName(s); !c.empty())
+		constantNames.push_back(c);
+	std::stringstream extraSource;
+	extraSource << "#define KERNEL_DOUBLE_PRECISION "
+		<< (s.scalarType == GlobalSettings::kDouble ? 1 : 0)
+		<< "\n";
+	extraSource << "#define KERNEL_SYNCHRONIZED_TRACING "
+		<< (s.synchronizedThreads ? 1 : 0)
+		<< "\n";
+	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
+	for (const auto& i : getIncludeFileNames(s))
+		extraSource << "\n#include \"" << i << "\"\n";
+	extraSource << "#define VOLUME_INTERPOLATION_T " <<
+		getPerThreadType(s) << "\n";
+	extraSource << "#define OUTPUT_CHANNELS " << channels << "\n";
+	extraSource << "#define VOLUME_USE_DIRECTION " << (hasDirection ? 1 : 0) << "\n";
+	extraSource << "#include \"renderer_volume_kernels5.cuh\"\n";
+	const auto fun0 = KernelLoader::Instance().getKernelFunction(
+		kernelName, extraSource.str(), constantNames, false, false);
+	if (!fun0.has_value())
+		throw std::runtime_error("Unable to compile kernel");
+	const auto fun = fun0.value();
+	if (auto c = getConstantDeclarationName(s); !c.empty())
+	{
+		CUdeviceptr ptr = fun.constant(c);
+		fillConstantMemory(s, ptr, stream);
+	}
+
+	//output tensors
+	int batches = positions.size(0);
+	auto densities = torch::empty({ batches, channels },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+	auto gradients = torch::empty({ batches, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+	auto curvature = torch::empty({ batches, 2 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	//launch kernel
+	int blockSize;
+	if (s.fixedBlockSize > 0)
+	{
+		if (s.fixedBlockSize > fun.bestBlockSize())
+			throw std::runtime_error("larger block size requested that can be fullfilled");
+		blockSize = s.fixedBlockSize;
+	}
+	else
+	{
+		blockSize = fun.bestBlockSize();
+	}
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(batches, blockSize)),
+		fun.minGridSize());
+	dim3 virtual_size{
+		static_cast<unsigned int>(batches), 1, 1 };
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "IVolumeInterpolation::evaluate", [&]()
+		{
+			const auto accPosition = accessor< ::kernel::Tensor2Read<scalar_t>>(positions);
+			const auto accDirection = hasDirection
+				? accessor< ::kernel::Tensor2Read<scalar_t>>(direction)
+				: ::kernel::Tensor2Read<scalar_t>();
+			const auto accDensity = accessor< ::kernel::Tensor2RW<scalar_t>>(densities);
+			const auto accGradient = accessor< ::kernel::Tensor2RW<scalar_t>>(gradients);
+			const auto accCurvature = accessor< ::kernel::Tensor2RW<scalar_t>>(curvature);
+			const void* args[] = { &virtual_size, &accPosition, &accDirection, &accDensity, &accGradient, &accCurvature };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+
+	setBoxMin(oldBoxMin);
+	setBoxMax(oldBoxMax);
+
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return std::make_tuple(densities, gradients, curvature);
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpolation::importanceSampling(
 	int numSamples, ITransferFunction_ptr tf,
     double minProb, int seed, int time,
@@ -139,6 +373,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 	s.scalarType = dtype;
 	s.volumeShouldProvideNormals = false;
 	s.interpolationInObjectSpace = false;
+	s.root = nullptr;
 	const auto oldBoxMax = boxMax();
 	const auto oldBoxMin = boxMin();
 	setBoxMin(make_double3(0, 0, 0));
@@ -158,9 +393,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 		<< (s.synchronizedThreads ? 1 : 0)
 		<< "\n";
 	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
 	for (const auto& i : getIncludeFileNames(s))
-		extraSource << "#include \"" << i << "\"\n";
-	extraSource << "#define VOLUME_INTERPOLATION_T " <<
+		extraSource << "\n#include \"" << i << "\"\n";
+	extraSource << "\n#define VOLUME_INTERPOLATION_T " <<
 		getPerThreadType(s) << "\n";
 
 	//kernel (TF)
@@ -264,6 +500,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 	s.scalarType = dtype;
 	s.volumeShouldProvideNormals = false;
 	s.interpolationInObjectSpace = false;
+	s.root = nullptr;
 	const auto oldBoxMax = boxMax();
 	const auto oldBoxMin = boxMin();
 	setBoxMin(make_double3(0, 0, 0));
@@ -283,9 +520,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> renderer::IVolumeInterpo
 		<< (s.synchronizedThreads ? 1 : 0)
 		<< "\n";
 	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
 	for (const auto& i : getIncludeFileNames(s))
-		extraSource << "#include \"" << i << "\"\n";
-	extraSource << "#define VOLUME_INTERPOLATION_T " <<
+		extraSource << "\n#include \"" << i << "\"\n";
+	extraSource << "\n#define VOLUME_INTERPOLATION_T " <<
 		getPerThreadType(s) << "\n";
 
 	//kernel (TF)
@@ -387,6 +625,8 @@ void renderer::IVolumeInterpolation::registerPybindModule(pybind11::module& m)
 		.def("object_resolution", &IVolumeInterpolation::objectResolution)
 		.def("box_min", &IVolumeInterpolation::boxMin)
 		.def("box_max", &IVolumeInterpolation::boxMax)
+		.def("set_box_min", &IVolumeInterpolation::setBoxMin)
+		.def("set_box_max", &IVolumeInterpolation::setBoxMax)
 		.def("box_size", &IVolumeInterpolation::boxSize)
 		.def("voxel_size", &IVolumeInterpolation::voxelSize)
 	    .def("output_channels", &IVolumeInterpolation::outputChannels)
@@ -396,6 +636,18 @@ void renderer::IVolumeInterpolation::registerPybindModule(pybind11::module& m)
 			},
 			py::doc("Evaluates the volume on the given position array of shape (B,3) and returns the interpolated densities of shape (B,1)"),
 				py::arg("positions"), py::arg("direction")=std::optional<torch::Tensor>{})
+		.def("evaluate_with_gradients", [](IVolumeInterpolation* self, torch::Tensor positions, const std::optional<torch::Tensor>& direction)
+			{
+				return self->evaluateWithGradient(positions, direction.value_or(torch::Tensor()), c10::cuda::getCurrentCUDAStream());
+			},
+			py::doc("Evaluates the volume on the given position array of shape (B,3) and returns the interpolated densities of shape (B,1) and gradients of shape (B,3)"),
+				py::arg("positions"), py::arg("direction") = std::optional<torch::Tensor>{})
+	    .def("evaluate_with_gradients_and_curvature", [](IVolumeInterpolation* self, torch::Tensor positions, const std::optional<torch::Tensor>& direction)
+			{
+				return self->evaluateWithGradientAndCurvature(positions, direction.value_or(torch::Tensor()), c10::cuda::getCurrentCUDAStream());
+			},
+			py::doc("Evaluates the volume on the given position array of shape (B,3) and returns the interpolated densities of shape (B,1), gradients of shape (B,3) and curvature of shape (B,2)"),
+				py::arg("positions"), py::arg("direction") = std::optional<torch::Tensor>{})
 		.def("importance_sampling", [](IVolumeInterpolation* self, int numSamples, ITransferFunction_ptr tf, double minProb,
 			int seed, int time, double densityMin, double densityMax, const std::string& dtype)
 		    {

@@ -122,6 +122,11 @@ def fibonacci_sphere(N:int, *, dtype=np.float32) -> Tuple[np.ndarray, np.ndarray
   return lat, lon
 
 
+def safe_normalize(a: torch.Tensor, axis=-1, epsilon:float=1e-4):
+  l2 = torch.norm(a, dim=axis, keepdim=True)
+  l2 = torch.clip(l2, min=epsilon)
+  return a / l2
+
 deprecated_names = ["make_real3", "make_real4", "renderer_dtype_np", "renderer_dtype_torch"]
 
 def __getattr__(name):
@@ -143,3 +148,13 @@ def next_multiple(a, b):
   m = a % b
   if m == 0: return a
   return a + b - m
+
+def div_up(num, denum):
+  """
+  Performs integer division num/denum, but rounds the result UP.
+  Source: https://stackoverflow.com/a/35125872/1786598
+  :param num:
+  :param denum:
+  :return:
+  """
+  return -(-num//denum)

@@ -14,6 +14,7 @@
  * RAY_EVALUATION_STEPPING__SKIP_TRANSFER_FUNCTION
  * RAY_EVALUATION_STEPPING__BLENDING_T
  * RAY_EVALUATION_STEPPING__BRDF_T
+ * RAY_EVALUATION_STEPPING__ENABLE_EARLY_OUT
  */
 
 namespace kernel
@@ -45,7 +46,7 @@ namespace kernel
 		BRDF_t brdf;
 
 		__device__ __inline__
-			RayEvaluationOutput eval(real3 rayStart, real3 rayDir, real_t tmax, int batch)
+		RayEvaluationOutput eval(real3 rayStart, real3 rayDir, real_t tmax, int batch)
 		{
 			real_t tmin, tmax1;
 			intersectionRayAABB(
@@ -83,7 +84,12 @@ namespace kernel
 			for (terminationIndex = 0; ; ++terminationIndex)
 			{
 				real_t tcurrent = tmin + terminationIndex * stepsize;
+#if RAY_EVALUATION_STEPPING__ENABLE_EARLY_OUT==1
 				const int isValid = (tcurrent <= tmax) && (output.color.w < alphaEarlyOut);
+#else
+				const int isValid = (tcurrent <= tmax);
+#endif
+
 #if KERNEL_SYNCHRONIZED_TRACING==0
 				if (!isValid) break;
 #else
@@ -97,20 +103,32 @@ namespace kernel
 
 #if RAY_EVALUATION_STEPPING__SKIP_TRANSFER_FUNCTION==1
 				//Volume directly outputs the color
-				const auto [value, isInside] = volume.eval<real4>(position, rayDir, batch);
-				auto color1 = value;
+				const auto resultFromForward = volume.eval<real4>(position, rayDir, batch);
+				auto color1 = resultFromForward.value;
 				color1.w *= stepsize; //Usually done in the TF, for color-fields, do it manually
 				auto n = volume.evalNormal(position, rayDir, batch);
 #else
 				//Volume stores the densities
-				const auto [value, isInside] = volume.eval<real_t>(position, rayDir, batch);
+				const auto resultFromForward = volume.eval<real_t>(position, rayDir, batch);
+				const auto value = resultFromForward.value;
+				const bool isInside = resultFromForward.isInside;
 				auto density2 = (value - densityMin) * divDensityRange;
 				auto color1 = make_real4(0);
 				real3 n = make_real3(0);
-				if (value >= densityMin)
-				{
-					n = volume.evalNormal(position, rayDir, batch);
 
+				//compute normal
+				const int requireNormal = isValid && (value >= densityMin);
+#if KERNEL_SYNCHRONIZED_TRACING==0
+				if (requireNormal)
+					n = volume.evalNormal(position, rayDir, resultFromForward, batch);
+#else
+				//evaluate normal if *any* thread requests normals (TensorCores)
+				if (__any_sync(0xffffffff, requireNormal))
+					n = volume.evalNormal(position, rayDir, resultFromForward, batch);
+#endif
+
+				if (requireNormal)
+				{
 					//evaluate TF
 					color1 = tf.eval(density2, n, previousDensity, stepsize, batch);
 				}

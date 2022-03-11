@@ -97,6 +97,90 @@ std::tuple<torch::Tensor, torch::Tensor> renderer::ICamera::generateRays(
 	return std::make_tuple(rayStart, rayDir);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> renderer::ICamera::generateRaysMultisampling(
+	int width, int height, bool doublePrecision, int numSamples, unsigned int time, CUstream stream)
+{
+	GlobalSettings s{};
+	s.scalarType = doublePrecision ? GlobalSettings::kDouble : GlobalSettings::kFloat;
+
+	//kernel
+	this->setAspectRatio(double(width) / height);
+	this->prepareRendering(s);
+	const std::string kernelName = "CameraGenerateRayMultisamplingKernel";
+	std::vector<std::string> constantNames;
+	if (const auto c = getConstantDeclarationName(s); !c.empty())
+		constantNames.push_back(c);
+	std::stringstream extraSource;
+	extraSource << "#define KERNEL_DOUBLE_PRECISION "
+		<< (s.scalarType == IKernelModule::GlobalSettings::kDouble ? 1 : 0)
+		<< "\n";
+	extraSource << getDefines(s) << "\n";
+	for (const auto& i : getIncludeFileNames(s))
+		extraSource << "#include \"" << i << "\"\n";
+	extraSource << "#define IMAGE_EVALUATOR__CAMERA_T " <<
+		getPerThreadType(s) << "\n";
+	extraSource << "#include \"renderer_camera_kernels.cuh\"\n";
+	const auto fun = KernelLoader::Instance().getKernelFunction(
+		kernelName, extraSource.str(), constantNames, false, false).value();
+	if (auto c = getConstantDeclarationName(s); !c.empty())
+	{
+		CUdeviceptr ptr = fun.constant(c);
+		fillConstantMemory(s, ptr, stream);
+	}
+
+	//output tensors
+	int batches = getBatches(s).value_or(1);
+	if (batches != 1)
+		throw std::runtime_error("A selected module is batched. This is not supported for multisampling, as the batch dimension is required for the samples");
+    batches = numSamples;
+	auto rayStart = torch::empty({ batches, height, width, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+	auto rayDir = torch::empty({ batches, height, width, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	//launch kernel
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(width * height * batches, fun.bestBlockSize())),
+		fun.minGridSize());
+	dim3 virtual_size{
+		static_cast<unsigned int>(width),
+		static_cast<unsigned int>(height),
+		static_cast<unsigned int>(batches) };
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "ICamera::generateRaysMultisampling", [&]()
+		{
+			const auto accStart = accessor< ::kernel::Tensor4RW<scalar_t>>(rayStart);
+			const auto accDir = accessor< ::kernel::Tensor4RW<scalar_t>>(rayDir);
+			const void* args[] = { &virtual_size, &accStart, &accDir, &time };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, fun.bestBlockSize(), 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return std::make_tuple(rayStart, rayDir);
+}
+
+std::vector<double3> renderer::ICamera::world2screen(int width, int height, const std::vector<double3>& world) const
+{
+	glm::mat4 view, projection, normal;
+	glm::vec3 origin;
+	computeOpenGlMatrices(width, height, view, projection, normal, origin);
+	std::vector<double3> out(world.size());
+	glm::mat4 pv = projection * view;
+	for (size_t i=0; i<world.size(); ++i)
+	{
+		glm::vec4 v1(world[i].x, world[i].y, world[i].z, 1.0f);
+		glm::vec4 v2 = pv * v1;
+		out[i].x = v2.x / v2.w;
+		out[i].y = v2.y / v2.w;
+		out[i].z = v2.z / v2.w;
+	}
+	return out;
+}
+
 void renderer::ICamera::registerPybindModule(pybind11::module& m)
 {
 	//guard double registration
@@ -115,16 +199,24 @@ void renderer::ICamera::registerPybindModule(pybind11::module& m)
 	namespace py = pybind11;
 	py::class_<ICamera, std::shared_ptr<ICamera>>(m, "ICamera")
 		.def_readonly("aspect_ratio", &ICamera::aspectRatio_)
-		.def("get_origin", &ICamera::getOrigin)
-		.def("get_front", &ICamera::getFront)
+		.def("get_origin", &ICamera::getOrigin, py::arg("batch") = 0)
+		.def("get_front", &ICamera::getFront, py::arg("batch")=0)
 		.def("generate_rays", [](ICamera* self, int width, int height, bool doublePrecision)
 			{
 				return self->generateRays(width, height, doublePrecision, c10::cuda::getCurrentCUDAStream());
 			},
 			py::doc("Generates the ray start and direction for the current camera."),
 				py::arg("width"), py::arg("height"), py::arg("double_precision") = false)
+		.def("generate_rays_multisampling", [](ICamera* self, int width, int height, int numSamples, int time, bool doublePrecision)
+			{
+				return self->generateRaysMultisampling(width, height, doublePrecision, numSamples, time, c10::cuda::getCurrentCUDAStream());
+			},
+			py::doc("Generates the ray start and direction for the current camera with multisampling.\nThe samples are placed in the batch dimension."),
+				py::arg("width"), py::arg("height"), py::arg("num_samples"), py::arg("time")=0, py::arg("double_precision") = false)
 		.def("get_parameters", &ICamera::getParameters)
 		.def("set_parameters", &ICamera::setParameters)
+	    .def("world2screen", &ICamera::world2screen,
+			py::doc("Converts from world coordinates to screen coordinates"))
 		//.def("get_parameters", [](ICamera* self) {return self->getParameters(); })
 		//.def("set_parameters", [](ICamera* self, const torch::Tensor& t) {self->setParameters(t); })
 		;

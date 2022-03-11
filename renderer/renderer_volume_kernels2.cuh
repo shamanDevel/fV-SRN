@@ -58,7 +58,7 @@ __global__ void ImportanceSampling(
 			color = make_real4(0, 0, 0, 0);
 			if (density >= densityMin) {
 				auto density2 = (density - densityMin) * divDensityRange;
-				color = tf.eval(density2, real3{ 0,0,0 }, { 0 }, { 1 }, 0);
+				color = tf.eval(density2, real3{ 0,0,0 }, { -1 }, { 1 }, 0);
 		    }
 			value = color.w;
 #endif

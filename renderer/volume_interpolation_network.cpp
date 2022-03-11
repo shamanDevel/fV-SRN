@@ -166,10 +166,18 @@ const std::string renderer::OutputParametrization::OutputModeNames[] = {
 	"density",
 	"density:direct",
 	"rgbo",
-	"rgbo:direct"
+	"rgbo:direct",
+	"densitygrad",
+	"densitygrad:direct",
+	"densitygrad:cubic",
+	"densitycurvature",
+	"densitycurvature:direct"
 };
-const int renderer::OutputParametrization::OutputModeNumChannels[] = {
-	1, 1, 4, 4
+const int renderer::OutputParametrization::OutputModeNumChannelsIn[] = {
+	1, 1, 4, 4, 4, 4, 4, 6, 6
+};
+const int renderer::OutputParametrization::OutputModeNumChannelsOut[] = {
+	1, 1, 4, 4, 1, 1, 1, 1, 1
 };
 
 renderer::OutputParametrization::OutputMode renderer::OutputParametrization::OutputModeFromString(const std::string& s)
@@ -183,21 +191,12 @@ renderer::OutputParametrization::OutputMode renderer::OutputParametrization::Out
 
 int renderer::OutputParametrization::channelsIn() const
 {
-	switch (outputMode)
-	{
-	case OutputMode::DENSITY:
-	case OutputMode::DENSITY_DIRECT:
-	    return 1;
-	case OutputMode::RGBO:
-	case OutputMode::RGBO_DIRECT:
-	    return 4;
-	default: throw std::runtime_error("Unknown output mode");
-	}
+	return OutputModeNumChannelsIn[outputMode];
 }
 
 int renderer::OutputParametrization::channelsOut() const
 {
-	return channelsIn();
+	return OutputModeNumChannelsOut[outputMode];
 }
 
 
@@ -208,7 +207,7 @@ renderer::OutputParametrization_ptr renderer::OutputParametrization::load(std::i
 	int version;
 	in.read(reinterpret_cast<char*>(&version), sizeof(int));
 	if (version != VERSION)
-		throw std::runtime_error("Unknown version for InputParametrization " + std::to_string(version));
+		throw std::runtime_error("Unknown version for OutputParametrization " + std::to_string(version));
 
 	auto p = std::make_shared<OutputParametrization>();
 	p->outputMode = OutputModeFromString(loadString(in));
@@ -239,11 +238,11 @@ renderer::Layer::Activation renderer::Layer::ActivationFromString(const std::str
 	throw std::runtime_error("No output mode found matching string " + s);
 }
 
-bool renderer::Layer::valid() const
+bool renderer::Layer::valid(bool isOutputLayer) const
 {
 	return (weights.size() == channelsIn*channelsOut) &&
 		(bias.size() == channelsOut) &&
-		(bias.size() == 1 || (bias.size() % 4 == 0));
+		(isOutputLayer || (bias.size() % 4 == 0));
 }
 
 const int renderer::Layer::VERSION = 2;
@@ -277,7 +276,7 @@ void renderer::Layer::save(std::ostream& out) const
 	out.write(reinterpret_cast<const char*>(&VERSION), sizeof(int));
 
 	int rows = channelsOut;
-    int cols = channelsIn;
+	int cols = channelsIn;
 	out.write(reinterpret_cast<const char*>(&rows), sizeof(int));
 	out.write(reinterpret_cast<const char*>(&cols), sizeof(int));
 
@@ -422,7 +421,7 @@ void renderer::LatentGrid::initEncodingByteGaussian(const torch::Tensor& t)
 			static constexpr float ENCODING_GAUSSIAN_SQRT2 = 1.4142135623730950488016887242096980f;
 			float tmp = ENCODING_GAUSSIAN_SQRT2 * myErfInv(ENCODING_GAUSSIAN_2_MINUS_EPSILON * (xFinal / 255.0f - 0.5f));
 			float valueReconstructed = gridOffsetOrMean[c] + tmp * gridScaleOrStd[c];
-		    //std::cout << "v=" << std::setprecision(4) << vx << " -> " << int(xFinal) << " -> " << valueReconstructed << std::endl;
+			//std::cout << "v=" << std::setprecision(4) << vx << " -> " << int(xFinal) << " -> " << valueReconstructed << std::endl;
 			encodingError += std::abs(vx - valueReconstructed);
 		}
 	}
@@ -469,7 +468,7 @@ bool renderer::LatentGrid::isValid() const
 }
 
 renderer::LatentGrid::GPUArray::GPUArray(int sizeX, int sizeY, int sizeZ, bool isFloat, const char* data)
-    : array(nullptr), texture(0)
+	: array(nullptr), texture(0)
 {
 	//create array
 	cudaExtent extent = make_cudaExtent(sizeX, sizeY, sizeZ);
@@ -604,7 +603,7 @@ void renderer::LatentGrid::save(std::ostream& out) const
 	out.write(reinterpret_cast<const char*>(&gridSizeZ), sizeof(int));
 	out.write(reinterpret_cast<const char*>(&gridSizeY), sizeof(int));
 	out.write(reinterpret_cast<const char*>(&gridSizeX), sizeof(int));
-    size_t memory = bytesPerEntry() * gridChannels * gridSizeZ * gridSizeY * gridSizeX;
+	size_t memory = bytesPerEntry() * gridChannels * gridSizeZ * gridSizeY * gridSizeX;
 	const char* data = grid.data();
 	out.write(data, memory);
 	if (encoding != FLOAT)
@@ -615,7 +614,7 @@ void renderer::LatentGrid::save(std::ostream& out) const
 }
 
 double renderer::LatentGridTimeAndEnsemble::setTimeGridFromTorch(int index, const torch::Tensor& t,
-                                                               LatentGrid::Encoding encoding)
+															   LatentGrid::Encoding encoding)
 {
 	TORCH_CHECK(index >= 0 && index < timeGrids.size(), "index out of bounds!");
 	timeGrids[index] = std::make_shared<LatentGrid>(t, encoding);
@@ -623,7 +622,7 @@ double renderer::LatentGridTimeAndEnsemble::setTimeGridFromTorch(int index, cons
 }
 
 double renderer::LatentGridTimeAndEnsemble::setEnsembleGridFromTorch(int index, const torch::Tensor& t,
-    LatentGrid::Encoding encoding)
+	LatentGrid::Encoding encoding)
 {
 	TORCH_CHECK(index >= 0 && index < ensembleGrids.size(), "index out of bounds!");
 	ensembleGrids[index] = std::make_shared<LatentGrid>(t, encoding);
@@ -643,11 +642,11 @@ bool renderer::LatentGridTimeAndEnsemble::isValid() const
 	bool encodingSet = false;
 	for (auto g : timeGrids)
 	{
-	    if (!g)
-	    {
+		if (!g)
+		{
 			std::cerr << "One latent grid was null" << std::endl;
 			return false;
-	    }
+		}
 		if (!g->isValid())
 			return false;
 		if (encodingSet)
@@ -692,13 +691,13 @@ bool renderer::LatentGridTimeAndEnsemble::isValid() const
 		int c = timeGrids[0]->gridChannels;
 		for (size_t i=1; i<timeGrids.size(); ++i)
 		{
-		    if (timeGrids[i]->gridChannels != c)
-		    {
+			if (timeGrids[i]->gridChannels != c)
+			{
 				std::cerr << "Time grid " << i << " uses a different channel count of " <<
 					timeGrids[i]->gridChannels << " than previous grids with a channel count of " <<
 					c << std::endl;
 				return false;
-		    }
+			}
 		}
 	}
 	if (!ensembleGrids.empty())
@@ -797,10 +796,10 @@ void renderer::LatentGridTimeAndEnsemble::save(std::ostream& out) const
 }
 
 renderer::SceneNetwork::SceneNetwork()
-    : boxMin_{make_float3(-5.f)}
-    , boxSize_{make_float3(1.f)}
-    , input_{std::make_shared<InputParametrization>()}
-    , output_{std::make_shared<OutputParametrization>()}
+	: boxMin_{make_float3(-5.f)}
+	, boxSize_{make_float3(1.f)}
+	, input_{std::make_shared<InputParametrization>()}
+	, output_{std::make_shared<OutputParametrization>()}
 {
 }
 
@@ -848,7 +847,7 @@ void renderer::SceneNetwork::addLayer(Layer_ptr layer)
 			hidden_.push_back(std::make_shared<Layer>(newChannelsIn, layer->channelsOut, wNew, layer->bias, layer->activation, layer->activationParameter));
 		} else
 		{
-		    //time adds an extra input after position -> only modify if we also have direction
+			//time adds an extra input after position -> only modify if we also have direction
 			if (input_->hasDirection)
 			{
 				newChannelsIn = layer->channelsIn + 1;
@@ -870,14 +869,14 @@ void renderer::SceneNetwork::addLayer(Layer_ptr layer)
 				hidden_.push_back(std::make_shared<Layer>(newChannelsIn, layer->channelsOut, wNew, layer->bias, layer->activation, layer->activationParameter));
 			} else
 			{
-			    //no change needed
+				//no change needed
 				hidden_.push_back(layer);
 			}
 		}
 	}
 	else if (layer->channelsIn < 16 || layer->channelsOut < 16)
 	{
-	    //first layer (no fourier features) or last layer (to density/color)
+		//first layer (no fourier features) or last layer (to density/color)
 		//transpose
 		Layer::weights_t wOld = layer->weights;
 		Layer::weights_t wNew;
@@ -967,7 +966,7 @@ bool renderer::SceneNetwork::valid() const
 				<< ", got " << l->channelsIn << std::endl;
 			return false;
 		}
-		if (!l->valid())
+		if (!l->valid(i == hidden_.size()-1))
 		{
 			std::cerr << "Invalid hidden layer " << i <<
 				", probably weights and bias don't match or are not a multiple of 4" << std::endl;
@@ -985,7 +984,7 @@ bool renderer::SceneNetwork::valid() const
 	return true;
 }
 
-int renderer::SceneNetwork::computeMaxWarps(bool onlySharedMemory) const
+int renderer::SceneNetwork::computeMaxWarps(bool onlySharedMemory, bool adjoint) const
 {
 	static const int maxShared = 48 * 1024;
 	static const int maxConstant = 16 * 1024;
@@ -995,7 +994,7 @@ int renderer::SceneNetwork::computeMaxWarps(bool onlySharedMemory) const
 
 	int numShared = 0; //num entries
 	int numConst = 0;
-    //input
+	//input
 	if (input_->numFourierFeatures)
 		numConst += input_->fourierMatrix.size();
 	//hidden
@@ -1021,14 +1020,21 @@ int renderer::SceneNetwork::computeMaxWarps(bool onlySharedMemory) const
 		numConst = 0;
 	}
 
+	int entriesPerThread = maxChannels;
+	if (adjoint)
+	{
+		entriesPerThread += (static_cast<int>(hidden_.size()) - 1) * maxChannels;
+	}
+
 	//scale with bytes per entry
 	numShared *= bytesPerEntry;
 	numConst *= bytesPerEntry;
 	maxChannels *= bytesPerEntry;
+	entriesPerThread *= bytesPerEntry;
 
 	if (numConst > maxConstant)
 		return -1; //constants out of bounds
-	int numWarps = static_cast<int>(std::floor((maxShared - numShared) / static_cast<float>(maxChannels * warpSize)));
+	int numWarps = static_cast<int>(std::floor((maxShared - numShared) / static_cast<float>(entriesPerThread * warpSize)));
 	if (numWarps <= 0)
 		return -1; //shared memory out of bounds
 	return numWarps;
@@ -1068,7 +1074,7 @@ renderer::SceneNetwork_ptr renderer::SceneNetwork::load(std::istream& in)
 	in.read(reinterpret_cast<char*>(&p->boxSize_.x), sizeof(float3));
 	if (version == 2)
 	{
-	    //include latent grid
+		//include latent grid
 		char hasLatentGrid;
 		in.read(&hasLatentGrid, 1);
 		if (hasLatentGrid>0)
@@ -1114,15 +1120,41 @@ std::string renderer::SceneNetwork::codeReturnType() const
 		return "real_t";
 	case OutputParametrization::RGBO:
 	case OutputParametrization::RGBO_DIRECT:
+		return "real4";
+	case OutputParametrization::DENSITY_GRADIENT:
+	case OutputParametrization::DENSITY_GRADIENT_DIRECT:
+	case OutputParametrization::DENSITY_GRADIENT_CUBIC:
+	case OutputParametrization::DENSITY_CURVATURE:
+	case OutputParametrization::DENSITY_CURVATURE_DIRECT:
 		return "real_t";
 	default: throw std::runtime_error("Unknown output mode");
 	}
 }
 
-std::string renderer::SceneNetwork::getDefines(const IKernelModule::GlobalSettings& s, 
-	int numWarps, bool firstAndLastInSharedMemory) const
+bool renderer::SceneNetwork::supportsNormals() const
 {
-	if (!cacheDefines_.empty()) return cacheDefines_;
+	return output_->isDensityGradient() || output_->isDensityCurvature();
+}
+
+std::string renderer::SceneNetwork::getDefines(
+	const IKernelModule::GlobalSettings& s, 
+	int numWarps, bool firstAndLastInSharedMemory,
+	GradientMode gradientMode) const
+{
+	// For time measures: keep the gradient mode (e.g. adjoint), even if no gradients
+	// are needed in the end.
+	//if (!s.volumeShouldProvideNormals) gradientMode = GradientMode::OFF_OR_DIRECT;
+
+	if (output_->isColor()) gradientMode = GradientMode::OFF_OR_DIRECT;
+	if (!cacheDefines_.empty() &&
+		cacheNumWarps_ == numWarps &&
+		cacheFirstAndLastInSharedMemory_ == firstAndLastInSharedMemory &&
+		cacheGradientMode_ == gradientMode) {
+		return cacheDefines_;
+	}
+	cacheNumWarps_ = numWarps;
+	cacheFirstAndLastInSharedMemory_ = firstAndLastInSharedMemory;
+	cacheGradientMode_ = gradientMode;
 
 	bool hasVolumetricFeatures = latentGrid_ != nullptr;
 	bool hasFourierFeatures = input_->numFourierFeatures > 0;
@@ -1180,9 +1212,10 @@ std::string renderer::SceneNetwork::getDefines(const IKernelModule::GlobalSettin
 	ss << "#define LATENT_GRID_CHANNELS_DIV16 " << latentGridChannelsDiv16 << "\n";
 	ss << "#define LATENT_GRID_ENCODING " << latentGridEncoding << "\n";
 	ss << "#define PASS_TIME_TO_NETWORK " << (input_->hasTime?1:0) << "\n";
+	ss << "#define GRADIENT_MODE " << static_cast<int>(gradientMode) << "\n";
 	//std::cout << "DEFINES:\n" << ss.str() << std::endl;
 	cacheDefines_ = ss.str();
-    return cacheDefines_;
+	return cacheDefines_;
 }
 
 std::vector<std::string> renderer::SceneNetwork::getIncludeFileNames(const IKernelModule::GlobalSettings& s) const
@@ -1201,14 +1234,15 @@ std::string renderer::SceneNetwork::getPerThreadType(const IKernelModule::Global
 }
 
 void renderer::SceneNetwork::fillConstantMemory(
-	const IKernelModule::GlobalSettings& s, CUdeviceptr ptr,
-    CUstream stream)
+	const IKernelModule::GlobalSettings& s, float fdStepsize, CUdeviceptr ptr,
+	CUstream stream)
 {
-	if (!cacheConstantMemory_.empty())
+	if (!cacheConstantMemory_.empty() && fdStepsize==cacheFDStepsize_)
 	{
 		CU_SAFE_CALL(cuMemcpyHtoDAsync(ptr, cacheConstantMemory_.data(), cacheConstantMemory_.size(), stream));
 		return;
 	}
+	cacheFDStepsize_ = fdStepsize;
 
 	static std::vector<char> MEMORY(1024 * 1024);
 
@@ -1246,7 +1280,7 @@ void renderer::SceneNetwork::fillConstantMemory(
 	do {printf(#ax ":"); for (int ii=0; ii<(count); ++ii) {printf(" %d", int(ax[ii]));} printf("\n"); } while(0)
 #define DUMP_ARRAY_FLOAT4(ax, count)	\
 	do {printf(#ax ":"); for (int ii=0; ii<(count); ++ii) {	\
-	    printf(" %.2f", ax[ii].x);	\
+		printf(" %.2f", ax[ii].x);	\
 		printf(" %.2f", ax[ii].y);	\
 		printf(" %.2f", ax[ii].z);	\
 		printf(" %.2f", ax[ii].w);	\
@@ -1261,7 +1295,7 @@ void renderer::SceneNetwork::fillConstantMemory(
 		int gridTotalChannelsDiv4 = gridTotalChannels / 4;
 		bool hasOffsetScale = latentGrid()->getCommonEncoding() != LatentGrid::FLOAT;
 
-	    //memory to be stored in the constant buffer
+		//memory to be stored in the constant buffer
 		std::vector<cudaTextureObject_t> cLatentGridA(gridTotalChannelsDiv4);
 		std::vector<cudaTextureObject_t> cLatentGridB(gridTotalChannelsDiv4);
 		std::vector<float4> cLatentGridOffsetA(gridTotalChannelsDiv4);
@@ -1372,6 +1406,8 @@ void renderer::SceneNetwork::fillConstantMemory(
 		if (hidden_[startHidden]->activationParameter != activationParameter)
 			throw std::runtime_error("Extra parameter of the activation must be the same over all layers");
 	addWithPadding(&activationParameter, sizeof(float));
+	addWithPadding(&fdStepsize, sizeof(float)); //finiteDifferencesStepsize
+	addWithPadding(&fdStepsize, sizeof(float)); //latentGridDifferencesStepSize
 
 	addWithPadding(nullptr, 0); //pad whole struct
 	//write out
@@ -1381,23 +1417,28 @@ void renderer::SceneNetwork::fillConstantMemory(
 }
 
 renderer::VolumeInterpolationNetwork::VolumeInterpolationNetwork()
-    : IVolumeInterpolation(false)
-    , selectedNetwork_(0)
-    , onlySharedMemory_(false)
+	: IVolumeInterpolation(false)
+	, selectedNetwork_(0)
+	, gradientMode_(SceneNetwork::GradientMode::OFF_OR_DIRECT)
+	, finiteDifferencesStepsize_(1/256.f)
+    , adjointLatentGridCentralDifferencesStepsizeScale_(4)
+	, onlySharedMemory_(false)
 {
 }
 
 void renderer::VolumeInterpolationNetwork::addNetwork(
 	SceneNetwork_ptr network, const std::string& filename)
 {
-	int numWarpsSharedOnly = network->computeMaxWarps(true);
-	int numWarpsMixed = network->computeMaxWarps(false);
+	int numWarpsSharedOnly = network->computeMaxWarps(true, false);
+	int numWarpsMixed = network->computeMaxWarps(false, false);
 	if (numWarpsSharedOnly < 0 && numWarpsMixed < 0)
 		throw std::runtime_error("The network is too large!");
 	networks_.push_back({
 		network,
 		numWarpsSharedOnly,
 		numWarpsMixed,
+		network->computeMaxWarps(true, true),
+		network->computeMaxWarps(false, true),
 		filename,
 		filename.empty() ? "" : std::filesystem::path(filename).filename().string()
 		});
@@ -1408,8 +1449,9 @@ void renderer::VolumeInterpolationNetwork::selectNetwork(int index)
 {
 	selectedNetwork_ = index;
 	auto net = networks_[index].network;
-	setBoxMin(make_double3(net->boxMin()));
-	setBoxMax(make_double3(net->boxSize()+net->boxMin()));
+	//call the super-methods to not overwite the network settings
+	IVolumeInterpolation::setBoxMin(make_double3(net->boxMin()));
+	IVolumeInterpolation::setBoxMax(make_double3(net->boxSize()+net->boxMin()));
 	if (net->latentGrid())
 	{
 		hasTimesteps_ = net->latentGrid()->hasTimeGrids();
@@ -1442,10 +1484,39 @@ void renderer::VolumeInterpolationNetwork::setNetwork(SceneNetwork_ptr network)
 	addNetwork(network, "");
 }
 
+renderer::SceneNetwork_ptr renderer::VolumeInterpolationNetwork::currentNetwork() const
+{
+	if (networks_.empty() || selectedNetwork_ < 0)
+		throw std::runtime_error("No network loaded");
+	return networks_[selectedNetwork_].network;;
+}
+
 void renderer::VolumeInterpolationNetwork::setTimeAndEnsemble(float time, int ensemble)
 {
 	auto net = networks_[selectedNetwork_].network;
 	net->setTimeAndEnsemble(time, ensemble);
+}
+
+void renderer::VolumeInterpolationNetwork::setBoxMin(const double3& box_min)
+{
+    IVolumeInterpolation::setBoxMin(box_min);
+	for (auto& net : networks_)
+	{
+		net.network->setBoxMin(make_float3(boxMin()));
+		net.network->setBoxSize(make_float3(boxSize()));
+		net.network->clearGPUResources();
+	}
+}
+
+void renderer::VolumeInterpolationNetwork::setBoxMax(const double3& box_max)
+{
+    IVolumeInterpolation::setBoxMax(box_max);
+	for (auto& net : networks_)
+	{
+		net.network->setBoxMin(make_float3(boxMin()));
+		net.network->setBoxSize(make_float3(boxSize()));
+		net.network->clearGPUResources();
+	}
 }
 
 std::string renderer::VolumeInterpolationNetwork::getName() const
@@ -1486,7 +1557,10 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 	for (int i = 0; i < networks_.size(); ++i)
 		networkNames[i] = networks_[i].humanname.c_str();
 	if (ImGui::ListBox("", &selectedNetwork_, networkNames.data(), networks_.size()))
+	{
+		selectNetwork(selectedNetwork_);
 		changed = true;
+	}
 	ImGui::SameLine();
 	ImGui::BeginGroup();
 	if (ImGui::Button(ICON_FA_FOLDER_OPEN "##Network"))
@@ -1498,7 +1572,7 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 		networks_.empty() ? ImGuiButtonFlags_Disabled : 0))
 	{
 		networks_.erase(networks_.begin() + selectedNetwork_);
-		selectedNetwork_ = std::max(0, selectedNetwork_ - 1);
+		selectNetwork(std::max(0, selectedNetwork_ - 1));
 		changed = true;
 	}
 	ImGui::EndGroup();
@@ -1506,12 +1580,12 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 	if (hasTimesteps_)
 	{
 		auto grid = networks_[selectedNetwork_].network->latentGrid();
-	    if (ImGui::SliderFloat("Time##Network", &currentTimestep_,
+		if (ImGui::SliderFloat("Time##Network", &currentTimestep_,
 			static_cast<float>(grid->timeMin), static_cast<float>(grid->timeMaxInclusive())))
-	    {
+		{
 			setTimeAndEnsemble(currentTimestep_, currentEnsemble_);
 			changed = true;
-	    }
+		}
 	}
 	if (hasEnsembles_)
 	{
@@ -1529,6 +1603,34 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 		changed = true;
 	}
 
+	const auto currentGradientMode = magic_enum::enum_name(gradientMode_);
+	if (ImGui::BeginCombo("Gradient Mode##Network", currentGradientMode.data()))
+	{
+		for (int i=0; i<magic_enum::enum_count<SceneNetwork::GradientMode>(); ++i)
+		{
+			SceneNetwork::GradientMode m = magic_enum::enum_value<SceneNetwork::GradientMode>(i);
+			auto name = magic_enum::enum_name(m);
+			bool selected = m == gradientMode_;
+			if (ImGui::Selectable(name.data(), selected))
+			{
+				gradientMode_ = m;
+				changed = true;
+			}
+			if (selected)
+				ImGui::SetItemDefaultFocus();
+		}
+		ImGui::EndCombo();
+	}
+	if (gradientMode_ == SceneNetwork::GradientMode::FINITE_DIFFERENCES)
+	{
+		float divStepsize = 1 / finiteDifferencesStepsize_;
+		if (ImGui::SliderFloat("1 / FD Stepsize##Network", &divStepsize, 32, 1024, "%.1f", 2))
+		{
+			finiteDifferencesStepsize_ = 1 / divStepsize;
+			changed = true;
+		}
+	}
+
 	if (!networks_.empty())
 	{
 		auto net = networks_[selectedNetwork_].network;
@@ -1539,13 +1641,14 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 			layers << ":" << net->getHidden(i)->channelsOut;
 		}
 		std::string layerStr = layers.str();
+		bool isAdjoint = gradientMode_ == SceneNetwork::GradientMode::ADJOINT_METHOD;
 		ImGui::Text("Input: direction=%d, #fourier=%d\nOutput: %s\nLayers: %s (%dB)\nWarps: %d / %d",
 			net->input()->hasDirection ? 1 : 0,
 			net->input()->numFourierFeatures,
 			OutputParametrization::OutputModeNames[net->output()->outputMode].c_str(),
 			layerStr.c_str(), net->numParameters()*2 /*sizeof(half)*/,
-			networks_[selectedNetwork_].numWarpsMixed, 
-			networks_[selectedNetwork_].numWarpsSharedOnly);
+			isAdjoint ? networks_[selectedNetwork_].numWarpsMixedAdjoint : networks_[selectedNetwork_].numWarpsMixed,
+			isAdjoint ? networks_[selectedNetwork_].numWarpsSharedOnlyAdjoint : networks_[selectedNetwork_].numWarpsSharedOnly);
 		if (net->latentGrid())
 		{
 			ImGui::Text("Grid: res=%d^3, channels=%d",
@@ -1560,34 +1663,58 @@ bool renderer::VolumeInterpolationNetwork::drawUI(UIStorage_t& storage)
 
 void renderer::VolumeInterpolationNetwork::load(const nlohmann::json& json, const ILoadingContext* fetcher)
 {
+	gradientMode_ = magic_enum::enum_cast<SceneNetwork::GradientMode>(json.value("gradientMode", ""))
+		.value_or(SceneNetwork::GradientMode::OFF_OR_DIRECT);
+	finiteDifferencesStepsize_ = json.value("finiteDifferencesStepsize", 1 / 256.f);
+
 	//load the networks
 	//TODO
 }
 
 void renderer::VolumeInterpolationNetwork::save(nlohmann::json& json, const ISavingContext* context) const
 {
+	json["gradientMode"] = magic_enum::enum_name(gradientMode_);
+	json["finiteDifferencesStepsize"] = finiteDifferencesStepsize_;
+
 	//save the networks
 	//TODO
 }
 
+int renderer::VolumeInterpolationNetwork::getCurrentNumWarps() const
+{
+	if (networks_.empty())
+		throw std::runtime_error("No network specified!");
+	const auto& net = networks_[selectedNetwork_];
+	bool isAdjoint = gradientMode_ == SceneNetwork::GradientMode::ADJOINT_METHOD;
+	int warpsSharedOnly = isAdjoint ? net.numWarpsSharedOnlyAdjoint : net.numWarpsSharedOnly;
+	int warpsMixed = isAdjoint ? net.numWarpsMixedAdjoint : net.numWarpsMixed;
+	if (warpsMixed > 0 && warpsSharedOnly > 0)
+		return onlySharedMemory_ ? warpsSharedOnly : warpsMixed;
+	return warpsMixed;
+}
+
 void renderer::VolumeInterpolationNetwork::prepareRendering(GlobalSettings& s) const
 {
-    IVolumeInterpolation::prepareRendering(s);
+	IVolumeInterpolation::prepareRendering(s);
 	if (networks_.empty())
 		throw std::runtime_error("No network specified!");
 
 	s.synchronizedThreads = true;
-
 	const auto& net = networks_[selectedNetwork_];
-	if (net.numWarpsMixed > 0 && net.numWarpsSharedOnly > 0) {
-		currentNumWarps_ = onlySharedMemory_ ? net.numWarpsSharedOnly : net.numWarpsMixed;
+
+	bool isAdjoint = gradientMode_ == SceneNetwork::GradientMode::ADJOINT_METHOD;
+	int warpsSharedOnly = isAdjoint ? net.numWarpsSharedOnlyAdjoint : net.numWarpsSharedOnly;
+	int warpsMixed = isAdjoint ? net.numWarpsMixedAdjoint : net.numWarpsMixed;
+
+	if (warpsMixed > 0 && warpsSharedOnly > 0) {
+		currentNumWarps_ = onlySharedMemory_ ? warpsSharedOnly : warpsMixed;
 		currentOnlyShared_ = onlySharedMemory_;
 	}
 	else
 	{
-		if (net.numWarpsMixed <= 0)
+		if (warpsMixed <= 0)
 			throw std::runtime_error("Network is too large!");
-		currentNumWarps_ = net.numWarpsMixed;
+		currentNumWarps_ = warpsMixed;
 		currentOnlyShared_ = false;
 	}
 	currentNumWarps_ = min(currentNumWarps_, MAX_BLOCK_SIZE / 32);
@@ -1621,13 +1748,35 @@ std::string renderer::VolumeInterpolationNetwork::getDefines(const GlobalSetting
 {
 	if (networks_.empty())
 		throw std::runtime_error("No network specified, can't render!");
+	const auto& net = networks_[selectedNetwork_];
+	
 	if (s.volumeShouldProvideNormals) {
-		std::cerr << "WARNING: normals requested, but the SceneNetwork can't provide those" << std::endl;
-		//throw std::runtime_error("Normals requested (TF or BRDF), but the SceneNetwork can't provide those");
+		switch (gradientMode_)
+		{
+		case SceneNetwork::GradientMode::OFF_OR_DIRECT:
+			if (!net.network->supportsNormals())
+				std::cerr << "WARNING: normals requested, but the SceneNetwork can't directly provide those, or FD/AD gradients are disabled" << std::endl;
+			break;
+		case SceneNetwork::GradientMode::FINITE_DIFFERENCES:
+		case SceneNetwork::GradientMode::ADJOINT_METHOD:
+			if (net.network->output()->isColor())
+				std::cerr << "WARNING: normales requested, but color-predicting networks can't provide those" << std::endl;
+			break;
+		}
+	}
+	if (s.volumeShouldProvideCurvature)
+	{
+		if (!net.network->output()->isDensityCurvature())
+		{
+			throw std::runtime_error("curvature can only be provided for network output mode 'densitycurvature");
+		}
+		if (gradientMode_ != SceneNetwork::GradientMode::OFF_OR_DIRECT)
+		{
+			throw std::runtime_error("curvature can only be provided directly be the network. The Adjoint-method or finite differences is not supported yet.");
+		}
 	}
 
-	const auto& net = networks_[selectedNetwork_];
-	return net.network->getDefines(s, currentNumWarps_, currentOnlyShared_);
+	return net.network->getDefines(s, currentNumWarps_, currentOnlyShared_, gradientMode_);
 }
 
 std::vector<std::string> renderer::VolumeInterpolationNetwork::getIncludeFileNames(const GlobalSettings& s) const
@@ -1655,7 +1804,14 @@ void renderer::VolumeInterpolationNetwork::fillConstantMemory(const GlobalSettin
 {
 	if (networks_.empty()) 
 		throw std::runtime_error("No network specified, can't render!");
-	networks_[selectedNetwork_].network->fillConstantMemory(s, ptr, stream);
+	auto net = networks_[selectedNetwork_].network;
+	float stepsize = finiteDifferencesStepsize_;
+	if (gradientMode_ == SceneNetwork::GradientMode::ADJOINT_METHOD) {
+		int gridResolution = net->latentGrid() ? net->latentGrid()->getResolution() : 1;
+		stepsize = 1 / (static_cast<float>(gridResolution) * adjointLatentGridCentralDifferencesStepsizeScale_);
+	}
+	net->fillConstantMemory(
+		s, stepsize, ptr, stream);
 }
 
 void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module& m)
@@ -1677,8 +1833,8 @@ void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module
 		.def("num_fourier_features", [](InputParametrization* p) {return p->numFourierFeatures; })
 		.def("set_fourier_matrix_from_tensor", &InputParametrization::setFourierMatrixFromTensor)
 		.def("disable_fourier_features", &InputParametrization::disableFourierFeatures)
-	    .def("channels_out", &InputParametrization::channelsOut)
-	    .def("valid", &InputParametrization::valid)
+		.def("channels_out", &InputParametrization::channelsOut)
+		.def("valid", &InputParametrization::valid)
 		;
 
 	py::class_<OutputParametrization, OutputParametrization_ptr> om(sn, "OutputParametrization");
@@ -1694,7 +1850,7 @@ void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module
 		.def("channels_in", &OutputParametrization::channelsIn)
 		;
 
-    py::class_<Layer, Layer_ptr> l(sn, "Layer");
+	py::class_<Layer, Layer_ptr> l(sn, "Layer");
 	py::enum_<Layer::Activation>(l, "Activation")
 		.value("ReLU", Layer::Activation::ReLU)
 		.value("Sine", Layer::Activation::Sine)
@@ -1730,24 +1886,24 @@ void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module
 	py::class_<LatentGridTimeAndEnsemble, LatentGridTimeAndEnsemble_ptr>(sn, "LatentGridTimeAndEnsemble")
 		.def(py::init<>())
 		.def(py::init<int, int, int, int, int>(), py::doc(R"(
-            Constructs a new container for time- and ensemble dependent Latent Grids.
-           
-            Ranges for the time keyframes are specified as timeMin, timeNum, timeStep.
-            The minimal timestep is 'timeMin', the maximal timestep is 'timeMin+(timeNum-1)*timeStep'.
-            Allowed time values are 't in [timeMin, timeMin+(timeNum-1)*timeStep]',
-            keyframes are where '(t-timeMin)%timeStep==0', linear interpolation in between.
-            
-            Ensembles are specified via ensembleMin, ensembleNum.
-            )"), py::arg("time_min"), py::arg("time_num"), py::arg("time_step"), 
-            py::arg("ensemble_min"), py::arg("ensemble_num"))
+			Constructs a new container for time- and ensemble dependent Latent Grids.
+		   
+			Ranges for the time keyframes are specified as timeMin, timeNum, timeStep.
+			The minimal timestep is 'timeMin', the maximal timestep is 'timeMin+(timeNum-1)*timeStep'.
+			Allowed time values are 't in [timeMin, timeMin+(timeNum-1)*timeStep]',
+			keyframes are where '(t-timeMin)%timeStep==0', linear interpolation in between.
+			
+			Ensembles are specified via ensembleMin, ensembleNum.
+			)"), py::arg("time_min"), py::arg("time_num"), py::arg("time_step"), 
+			py::arg("ensemble_min"), py::arg("ensemble_num"))
 		.def_readonly("time_min", &LatentGridTimeAndEnsemble::timeMin)
-	    .def_readonly("time_num", &LatentGridTimeAndEnsemble::timeNum)
-	    .def_readonly("time_step", &LatentGridTimeAndEnsemble::timeStep)
-	    .def_readonly("ensemble_min", &LatentGridTimeAndEnsemble::ensembleMin)
-	    .def_readonly("ensemble_num", &LatentGridTimeAndEnsemble::ensembleNum)
-	    .def_property_readonly("time_max_inclusive", &LatentGridTimeAndEnsemble::timeMaxInclusive)
-	    .def_property_readonly("ensemble_max_inclusive", &LatentGridTimeAndEnsemble::ensembleMaxInclusive)
-	    .def("interpolate_time", &LatentGridTimeAndEnsemble::interpolateTime,
+		.def_readonly("time_num", &LatentGridTimeAndEnsemble::timeNum)
+		.def_readonly("time_step", &LatentGridTimeAndEnsemble::timeStep)
+		.def_readonly("ensemble_min", &LatentGridTimeAndEnsemble::ensembleMin)
+		.def_readonly("ensemble_num", &LatentGridTimeAndEnsemble::ensembleNum)
+		.def_property_readonly("time_max_inclusive", &LatentGridTimeAndEnsemble::timeMaxInclusive)
+		.def_property_readonly("ensemble_max_inclusive", &LatentGridTimeAndEnsemble::ensembleMaxInclusive)
+		.def("interpolate_time", &LatentGridTimeAndEnsemble::interpolateTime,
 			py::doc("Computes the interpolation index into the list of time grids based on the given absolute time in [timeMin, timeMin+timeNum-1]"),
 			py::arg("time"))
 		.def("interpolate_ensemble", &LatentGridTimeAndEnsemble::interpolateEnsemble,
@@ -1757,25 +1913,25 @@ void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module
 			py::doc("Returns the time grid at the specified integer index"), py::arg("index"))
 		.def("get_ensemble_grid", static_cast<LatentGrid_ptr(LatentGridTimeAndEnsemble::*)(int)>(&LatentGridTimeAndEnsemble::getEnsembleGrid),
 			py::doc("Returns the ensemble grid at the specified integer index"), py::arg("index"))
-	    .def("set_time_grid_from_torch", &LatentGridTimeAndEnsemble::setTimeGridFromTorch,
+		.def("set_time_grid_from_torch", &LatentGridTimeAndEnsemble::setTimeGridFromTorch,
 			py::doc("Sets the grid at the given index from the pytorch tensor."),
 			py::arg("index"), py::arg("tensor"), py::arg("encoding"))
 		.def("set_ensemble_grid_from_torch", &LatentGridTimeAndEnsemble::setEnsembleGridFromTorch,
 			py::doc("Sets the grid at the given index from the pytorch tensor."),
 			py::arg("index"), py::arg("tensor"), py::arg("encoding"))
-	    .def("is_valid", &LatentGridTimeAndEnsemble::isValid)
-	    .def("common_encoding", &LatentGridTimeAndEnsemble::getCommonEncoding)
-	    .def("time_channels", &LatentGridTimeAndEnsemble::getTimeChannels)
-	    .def("ensemble_channels", &LatentGridTimeAndEnsemble::getEnsembleChannels)
-    ;
+		.def("is_valid", &LatentGridTimeAndEnsemble::isValid)
+		.def("common_encoding", &LatentGridTimeAndEnsemble::getCommonEncoding)
+		.def("time_channels", &LatentGridTimeAndEnsemble::getTimeChannels)
+		.def("ensemble_channels", &LatentGridTimeAndEnsemble::getEnsembleChannels)
+	;
 
 	sn.def(py::init<>())
 		.def_property_readonly("input", [](SceneNetwork& n) {return n.input(); })
 		.def_property_readonly("output", [](SceneNetwork& n) {return n.output(); })
-	    .def_property("latent_grid",
+		.def_property("latent_grid",
 			static_cast<LatentGridTimeAndEnsemble_ptr(SceneNetwork::*)()>(&SceneNetwork::latentGrid),
-	        &SceneNetwork::setLatentGrid,
-	        py::doc("read or write the latent grid"))
+			&SceneNetwork::setLatentGrid,
+			py::doc("read or write the latent grid"))
 		.def("add_layer", &SceneNetwork::addLayerFromTorch,
 			py::arg("weights"), py::arg("bias"), py::arg("activation"), py::arg("activation_parameter")=1.0f)
 		.def("num_layers", &SceneNetwork::numLayers)
@@ -1793,32 +1949,59 @@ void renderer::VolumeInterpolationNetwork::registerPybindModule(pybind11::module
 				std::ifstream in(filename, std::ifstream::binary);
 				return SceneNetwork::load(in);
 			})
-	    .def("num_parameters", &SceneNetwork::numParameters)
-        .def("compute_max_warps", &SceneNetwork::computeMaxWarps,
+		.def("num_parameters", &SceneNetwork::numParameters)
+		.def("compute_max_warps", &SceneNetwork::computeMaxWarps,
 					py::doc(R"(
-	             Computes the maximal number of warps that are possible
-	             if this network is evaluated using tensor cores.
-	             The number of warps is limited by the available shared memory.
-	             This method returns a negative number if the network is too big.
-            )"), py::arg("only_shared_memory"))
-	    .def("clear_gpu_resources", &SceneNetwork::clearGPUResources, py::doc(R"(
-                It is assumed that the network is fully configured before the first render.
-                Before rendering it for the first time, GPU resources and settings are automatically
-                allocated and cached.
-	            To clear those GPU resources (in case you do want to edit it afterwards), call
-                this method.
-            )"))
-	    .def("set_time_and_ensemble", &SceneNetwork::setTimeAndEnsemble, py::doc(R"(
-    Sets the time and ensemble to be used for rendering.
-    See time_min, time_max_inclusive, ensemble_min, ensemble_max_inclusive of 
-    LatentGridTimeAndEnsemble for the allowed bounds)"),
-            py::arg("time"), py::arg("ensemble"))
-        ;
+				 Computes the maximal number of warps that are possible
+				 if this network is evaluated using tensor cores.
+				 The number of warps is limited by the available shared memory.
+				 This method returns a negative number if the network is too big.
+			)"), py::arg("only_shared_memory"), py::arg("adjoint")=false)
+		.def("clear_gpu_resources", &SceneNetwork::clearGPUResources, py::doc(R"(
+				It is assumed that the network is fully configured before the first render.
+				Before rendering it for the first time, GPU resources and settings are automatically
+				allocated and cached.
+				To clear those GPU resources (in case you do want to edit it afterwards), call
+				this method.
+			)"))
+		.def("set_time_and_ensemble", &SceneNetwork::setTimeAndEnsemble, py::doc(R"(
+	Sets the time and ensemble to be used for rendering.
+	See time_min, time_max_inclusive, ensemble_min, ensemble_max_inclusive of 
+	LatentGridTimeAndEnsemble for the allowed bounds)"),
+			py::arg("time"), py::arg("ensemble"))
+		;
 
-	py::class_<VolumeInterpolationNetwork, IVolumeInterpolation, std::shared_ptr<VolumeInterpolationNetwork>>(m, "VolumeInterpolationNetwork")
-		.def(py::init<>())
-        .def("set_network", &VolumeInterpolationNetwork::setNetwork)
-	    .def_readwrite("only_shared_memory", &VolumeInterpolationNetwork::onlySharedMemory_)
+		py::class_<VolumeInterpolationNetwork, IVolumeInterpolation, std::shared_ptr<VolumeInterpolationNetwork>> n(m, "VolumeInterpolationNetwork");
+		py::enum_<SceneNetwork::GradientMode>(n, "GradientMode")
+			.value("OFF_OR_DIRECT", SceneNetwork::GradientMode::OFF_OR_DIRECT, R"(
+	OutputParametrization::DENSITY or ::COLOR -> disable gradient.
+	OutputParametrization::DENSITY_GRADIENT -> use direct prediction gradient )")
+			.value("FINITE_DIFFERENCES", SceneNetwork::GradientMode::FINITE_DIFFERENCES,
+				"Use Finite Differences, see finite_differences_stepsize")
+			.value("ADJOINT_METHOD", SceneNetwork::GradientMode::ADJOINT_METHOD,
+				"Use the adjoint method")
+		;
+		n.def(py::init<>())
+			.def("set_network", &VolumeInterpolationNetwork::setNetwork)
+	        .def("current_network", &VolumeInterpolationNetwork::currentNetwork)
+			.def_readwrite("only_shared_memory", &VolumeInterpolationNetwork::onlySharedMemory_)
+			.def_property("gradient_mode", 
+				&VolumeInterpolationNetwork::gradientMode,
+				&VolumeInterpolationNetwork::setGradientMode)
+			.def_property("finite_differences_stepsize",
+				&VolumeInterpolationNetwork::finiteDifferencesStepsize,
+				&VolumeInterpolationNetwork::setFiniteDifferencesStepsize,
+				py::doc(R"(
+	The stepsize for finite-difference gradient computation.
+	Note: don't set it too low or you'll get massive cancellation errors due to the half-precision evaluation.)"))
+	        .def_readwrite("adjoint_latent_grid_central_differences_stepsize_scale", &VolumeInterpolationNetwork::adjointLatentGridCentralDifferencesStepsizeScale_,
+				py::doc(R"(
+	In the adjoint method, the gradients through the latent grid sampling
+	has still to be approximated via central differences.
+	This approximation is perfect for an infinite small stepsize, if one ignores rounding errors.
+	The final stepsize is set to
+	 1/(latentGridResolution * adjointLatentGridCentralDifferencesStepsizeScale_)
+            )"))
 		;
 	
 }

@@ -2,6 +2,7 @@
 
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtx/string_cast.hpp>
+#include <exception>
 
 renderer::RasterizationMeshes::MeshInfo::MeshInfo(
     pyFloatArray vertices, pyFloatArray normals, pyIntArray indices, bool decouple)
@@ -177,7 +178,7 @@ void renderer::RasterizationMeshes::performRasterization(const RasterizingContex
         m->data_->drawIndexed(GL_TRIANGLES);
     }
 #else
-    throw std::runtime_error("OpenGL-support disabled, ParticleIntegration is not available");
+    throw std::runtime_error("OpenGL-support disabled, RasterizationMeshes is not available");
 #endif
 }
 

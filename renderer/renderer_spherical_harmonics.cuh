@@ -112,8 +112,8 @@ template<typename T>
 struct SphericalHarmonicsCoeff<T, 2, 2>
 {
     static __host__ __device__ __forceinline__ T eval(const T& x, const T& y, const T& z) {
-        // 0.25 * sqrt(15/pi) * (x^2 - y^2)
-        return T(0.546274) * (x * x - y * y);
+        // 0.5 * sqrt(15/pi) * (x^2 - y^2)
+        return T(1.092548) * (x * x - y * y);
     }
 };
 

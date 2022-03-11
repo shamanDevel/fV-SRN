@@ -62,6 +62,25 @@ public:
 		int width, int height, bool doublePrecision, CUstream stream);
 
 	/**
+	 * Generate the rays for the current camera settings.
+	 * The batch size is determined by the settings, the width and height by
+	 * the argument.
+	 *
+	 * \param width the width of the image
+	 * \param height the height of the image
+	 * \param doublePrecision true -> result is of dtype 'double'. False -> 'float'
+	 * \param numSamples the number of samples to generate
+	 * \param time the time for the random number generator
+	 * \param stream the cuda stream
+	 * \return a tuple (ray start, ray direction), each of shape B*H*W*3.
+	 *   <b>Note that channel is last!</b>
+	 *   This is to allow for easy reshaping to (BHW)*3 for scene network
+	 *   training
+	 */
+	virtual std::tuple<torch::Tensor, torch::Tensor> generateRaysMultisampling(
+		int width, int height, bool doublePrecision, int numSamples, unsigned int time, CUstream stream);
+
+	/**
 	 * Returns the tensor of shape (B,...) that parameterizes the camera.
 	 * The shape of the returned tensor must be equal for all instances of the
 	 * same subclass of ICamera to allow batches, but might vary for different subclasses.
@@ -82,6 +101,11 @@ public:
 	 */
 	virtual void computeOpenGlMatrices(int width, int height, 
 		glm::mat4& viewOut, glm::mat4& projectionOut, glm::mat4& normalOut, glm::vec3& originOut) const = 0;
+
+	/**
+	 * Converts from world coordinates to normalized screen coordinates
+	 */
+	virtual std::vector<double3> world2screen(int width, int height, const std::vector<double3>& world) const;
 
 protected:
 	void registerPybindModule(pybind11::module& m) override;

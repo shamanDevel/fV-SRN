@@ -39,15 +39,6 @@ IMAGE_FOLDER = os.path.join(BASE_PATH, "images_latex")
 LATEX_IMAGE_PREFIX = ""
 LATEX_IMAGE_SIZE = "height=3cm"
 
-if os.name != 'nt':
-    CONFIG_SUFFIX = "-server"
-    VOLUME_PREFIX_SCALARFLOW = "/home/weiss/isosurface-super-resolution-data/volumes"
-    VOLUME_PREFIX = "/home/weiss/isosurface-super-resolution-data/volumes/Scalar"
-else:
-    CONFIG_SUFFIX = ""
-    VOLUME_PREFIX_SCALARFLOW = "E:/Datasets/Volumes/ScalarFlow"
-    VOLUME_PREFIX = "E:/Datasets/Volumes/Scalar"
-
 class Config(NamedTuple):
     name: str
     settings: str
@@ -57,6 +48,8 @@ class Config(NamedTuple):
     overwrite_samples: Optional[str] = None
     num_refinement: int = 0
     overwrite_epochs: Optional[int] = None
+    overwrite_checkpoints: Optional[int] = None
+    overwrite_rebuild: Optional[int] = None
 
 configX = [
     Config(
@@ -66,16 +59,20 @@ configX = [
         human_name="Richtmyer-Meshkov, T=60",
     ),
     Config(
-        name = "ejecta70",
-        settings = "config-files/ejecta70-v6-dvr.json",
-        base_resolution = 256,
-        human_name="Ejecta, T=70",
-    ),
-    Config(
         name = "skull",
-        settings = "config-files/skull-v6-dvr.json",
+        settings = "config-files/skull-v6-dvr.json", #"neuraltextures/config-files/skull-v5-dvr.json",
         base_resolution= 256,
         human_name="Skull",
+    ),
+    Config(
+        name="ejecta1024",
+        settings="config-files/ejecta1024-v6-dvr.json",
+        base_resolution=1024,
+        human_name="Ejecta $1024^3",
+        overwrite_samples="1024**3",
+        overwrite_epochs=40,  # otherwise, it takes too long
+        overwrite_checkpoints=5,
+        overwrite_rebuild=21
     ),
     Config(
         name = "jet",
@@ -168,7 +165,7 @@ def findNetworkDimension(target_num_parameters, channels_last):
         layers = getLayerStr(num_channels)
         net = InnerNetwork(input_channels=3, output_channels=channels_last,
                            layers=layers, activation="ResidualSine",
-                           latent_size=0)
+                           latent_size=0, split_density_and_auxiliary=False)
         params = 0
         for p in net.parameters(recurse=True):
             params += p.numel()
@@ -249,13 +246,15 @@ def main():
 def train(config: Config, onlynet_layer_str:str, best_network_layers, training_samples):
 
     epochs = config.overwrite_epochs or NUM_EPOCHS
+    save_frequency = config.overwrite_checkpoints or 20
+    rebuild = config.overwrite_rebuild or 51
     common_args = [
         sys.executable, "volnet/train_volnet.py",
         config.settings,
         "--train:mode", "world",
         "--train:samples", training_samples,
         "--train:sampler_importance", "0.01",
-        '--rebuild_dataset', '51',
+        '--rebuild_dataset', str(rebuild),
         "--val:copy_and_split",
         "--outputmode", "density:direct",
         "--lossmode", "density",
@@ -265,7 +264,7 @@ def train(config: Config, onlynet_layer_str:str, best_network_layers, training_s
         "--logdir", BASE_PATH+'/log',
         "--modeldir", BASE_PATH+'/model',
         "--hdf5dir", BASE_PATH+'/hdf5',
-        '--save_frequency', '20'
+        '--save_frequency', str(save_frequency)
     ]
 
     onlynet_args = [
@@ -407,8 +406,8 @@ def eval(config: Config, only_grid_resolution:int, stepsize:float, compression:f
     timingsX = []
     for i in range(num_cameras):
         if i==0:
-            _ = base_ln.render_reference(cameras[i], width, height, timer=None) # warmup
-        reference_images[i] = base_ln.render_reference(cameras[i], width, height, timer=timer, num_refine=config.num_refinement)
+            _ = base_ln.render_reference(cameras[i], width, height, stepsize_world=stepsize, timer=None) # warmup
+        reference_images[i] = base_ln.render_reference(cameras[i], width, height, stepsize_world=stepsize, timer=timer, num_refine=config.num_refinement)
         timingsX.append(timer.elapsed_milliseconds()/1000.0)
         imageio.imwrite(
             os.path.join(image_folder_reference, 'reference%03d.png' % i),

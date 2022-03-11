@@ -45,6 +45,9 @@ struct Parameter<T> : ParameterBase								\
 	std::variant<T, torch::Tensor> value;										    \
 	enum { supportsGradients = false };							\
 	static constexpr ParameterType type = ParameterType::PT;	\
+	Parameter() = default;															\
+	Parameter(const T& v) : value(v) {}												\
+	Parameter(const torch::Tensor& v) : value(v) {}									\
 };
 PARAMETER_NON_DIFFERENTIABLE(bool, Bool);
 PARAMETER_NON_DIFFERENTIABLE(int, Int);

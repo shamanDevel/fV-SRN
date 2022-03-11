@@ -2,6 +2,7 @@
 
 #include "renderer_tensor.cuh"
 #include "renderer_utils.cuh"
+#include "helper_matrixmath.cuh"
 
 #include <forward_vector.h>
 #include "renderer_cudad_bridge.cuh"
@@ -17,6 +18,7 @@
  * VOLUME_INTERPOLATION_GRID__TEXTURE_TYPE
  * VOLUME_INTERPOLATION_GRID__TEXTURE_EXTRACTOR
  * VOLUME_INTERPOLATION_GRID__GRID_RESOLUTION_OLD_BEHAVIOR
+ * VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID
  */
 
 namespace kernel
@@ -46,6 +48,9 @@ namespace kernel
 	{
 		Value_t value;
 		bool isInside;
+#ifdef VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID
+		real2 curvature;
+#endif
 	};
 
 	struct VolumeInterpolationGrid
@@ -209,14 +214,19 @@ namespace kernel
 
 			//now perform the interpolation
 			auto value = sample(position, batch);
+#ifdef VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID
+			real_t density = value.x;
+			real2 curvature = make_real2(value.y, value.z);
+			return VolumeGridOutput<Value_t>{ density, isInside, curvature };
+#else
 			static_assert(is_same_v<decltype(value), Value_t>,
 				"Requested a different return type than the one the TextureExtractur returned");
 
-			//done
 			return VolumeGridOutput<Value_t>{ value, isInside };
+#endif
 		}
 
-		__device__ __inline__ real3 evalNormal(real3 position, real3 direction, int batch)
+		__device__ __inline__ real3 evalNormalImpl(real3 position, int batch)
 		{
 			//the texture is adressed in unnormalized coordinates
 #ifndef VOLUME_INTERPOLATION_GRID__OBJECT_SPACE
@@ -231,24 +241,92 @@ namespace kernel
 #endif
 
 			//compute normal
+			const real3 normalScale = volumeInterpolationGridParameters.normalScale;
+			const real3 normalStep = volumeInterpolationGridParameters.normalStep;
 			real3 normal = make_real3(0);
 #ifdef VOLUME_INTERPOLATION_GRID__REQUIRES_NORMAL
-			normal.x = volumeInterpolationGridParameters.normalScale.x * (
-				sample(position + make_real3(volumeInterpolationGridParameters.normalStep.x, 0, 0), batch) -
-				sample(position - make_real3(volumeInterpolationGridParameters.normalStep.x, 0, 0), batch)
+#ifdef VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID
+			normal.x = normalScale.x * (
+				sample(position + make_real3(normalStep.x, 0, 0), batch).x -
+				sample(position - make_real3(normalStep.x, 0, 0), batch).x
 				);
-			normal.y = volumeInterpolationGridParameters.normalScale.y * (
-				sample(position + make_real3(0, volumeInterpolationGridParameters.normalStep.y, 0), batch) -
-				sample(position - make_real3(0, volumeInterpolationGridParameters.normalStep.y, 0), batch)
+			normal.y = normalScale.y * (
+				sample(position + make_real3(0, normalStep.y, 0), batch).x -
+				sample(position - make_real3(0, normalStep.y, 0), batch).x
 				);
-			normal.z = volumeInterpolationGridParameters.normalScale.z * (
-				sample(position + make_real3(0, 0, volumeInterpolationGridParameters.normalStep.z), batch) -
-				sample(position - make_real3(0, 0, volumeInterpolationGridParameters.normalStep.z), batch)
+			normal.z = normalScale.z * (
+				sample(position + make_real3(0, 0, normalStep.z), batch).x -
+				sample(position - make_real3(0, 0, normalStep.z), batch).x
 				);
+#else
+			normal.x = normalScale.x * (
+				sample(position + make_real3(normalStep.x, 0, 0), batch) -
+				sample(position - make_real3(normalStep.x, 0, 0), batch)
+				);
+			normal.y = normalScale.y * (
+				sample(position + make_real3(0, normalStep.y, 0), batch) -
+				sample(position - make_real3(0, normalStep.y, 0), batch)
+				);
+			normal.z = normalScale.z * (
+				sample(position + make_real3(0, 0, normalStep.z), batch) -
+				sample(position - make_real3(0, 0, normalStep.z), batch)
+				);
+#endif
 #endif
 
 			//done
 			return normal;
 		}
+
+	    template<typename Value_t>
+	    __device__ __inline__ real3 evalNormal(real3 position, real3 direction,
+		    const VolumeGridOutput<Value_t>& resultFromEval, int batch)
+	    {
+		    return evalNormalImpl(position, batch);
+	    }
+
+	    template<typename Value_t>
+	    __device__ __inline__ real2 evalCurvature(real3 position, real3 direction,
+		    const VolumeGridOutput<Value_t>& resultFromEval, int batch)
+	    {
+#ifdef VOLUME_INTERPOLATION_GRID__CURVATURE_FROM_GRID
+			real2 curvature = resultFromEval.curvature;
+			return curvature; //TODO: scale?
+#else
+		    // 1. measure gradient
+		    real3 g = evalNormalImpl(position, batch);
+		    real_t gNorm = rmax(length(g), real_t(1e-7));
+		    real3 n = -g / gNorm;
+		    real3x3 P = real3x3::Identity() - real3x3::OuterProduct(n, n);
+
+		    // 2. measure Hessian matrix
+#if VOLUME_INTERPOLATION_GRID__GRID_RESOLUTION_OLD_BEHAVIOR==1
+			auto scale = volumeInterpolationGridParameters.resolutionMinusOne;
+#else
+			auto scale = volumeInterpolationGridParameters.resolutionMinusOne + 1;
+#endif
+			real3 h = volumeInterpolationGridParameters.normalStep * 
+				volumeInterpolationGridParameters.boxSize / make_real3(scale);
+
+		    real3 denom = 1 / (2 * h);
+		    real3x3 Hprime = real3x3::FromColumns(
+			    denom.x * (evalNormalImpl(position + make_real3(h.x, 0, 0), batch) - evalNormalImpl(position - make_real3(h.x, 0, 0), batch)),
+			    denom.y * (evalNormalImpl(position + make_real3(0, h.y, 0), batch) - evalNormalImpl(position - make_real3(0, h.y, 0), batch)),
+			    denom.z * (evalNormalImpl(position + make_real3(0, 0, h.z), batch) - evalNormalImpl(position - make_real3(0, 0, h.z), batch))
+		    );
+		    real3x3 H = 0.5 * (Hprime + Hprime.transpose()); //make symmetric
+		    real3x3 G = (-1 / gNorm) * P.matmul(H.matmul(P));
+
+		    // 3. extract curvature 
+		    real_t T = G.trace();
+		    real_t F = G.frobenius();
+		    real_t discr = sqrtr(2 * F * F - T * T);
+		    real_t k1 = 0.5 * (T + discr);
+		    real_t k2 = 0.5 * (T - discr);
+		    if (isnan(k1) || isnan(k2))
+			    k1 = k2 = real_t(0); //degenerated point
+		    return make_real2(k1, k2);
+#endif
+	    }
 	};
 }

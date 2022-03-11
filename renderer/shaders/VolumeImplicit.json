@@ -1,0 +1,152 @@
+[
+    {
+        "name": "Marschner Lobb",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {
+            "fM": 6.0,
+            "alpha": 0.25
+        },
+        "codeForward": "auto r = sqrtf(x * x + y * y);\n auto pr = cosf(2 * M_PI * p.fM * cosf(M_PI * r / 2));\n auto num = (1 - sinf(M_PI * z / 2)) + p.alpha * (1 + pr);\n auto denom = 2 * (1 + p.alpha);\n return num / denom;"
+    },
+    {
+        "name": "Cube",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {
+            "scale": 0.5
+        },
+        "codeForward": "return 1 - sqrtf(sqr(fmaxf(0.0f, fabsf(x) - p.scale)) + sqr(fmaxf(0.0f, fabsf(y) - p.scale)) + sqr(fmaxf(0.0f, fabsf(z) - p.scale)));"
+    },
+    {
+        "name": "Sphere",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "return 1 - sqrtf(x*x+y*y+z*z);",
+        "codeGradient": "float a = sqrtf(x*x+y*y+z*z);\n float denum = a<1e-6 ? 1 : -1.0f/a;\n return make_float3(x*denum, y*denum, z*denum);"
+    },
+    {
+        "name": "InverseSphere",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "return sqrtf(x*x+y*y+z*z);"
+    },
+    {
+        "name": "PuffyCube",
+        "dtype": "FLOAT",
+        "boxsize": 2.6,
+        "valuemin": -0.76,
+        "valuemax": 0.75,
+        "parameters": {},
+        "codeForward": "auto x2=x*x; auto y2=y*y; auto z2=z*z; return x2+y2+z2-(x2*x2)-(y2*y2)-(z2*z2);"
+    },
+    {
+        "name": "DingDong",
+        "dtype": "FLOAT",
+        "boxsize": 4,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "return implicit2Density(x * x + 4 * y * y - z * (1 - z * z));"
+    },
+    {
+        "name": "Endrass",
+        "dtype": "FLOAT",
+        "boxsize": 4,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto a = sqr(x + y) - 2;\n auto b = sqr(x - y) - 2;\n auto c = -4 * (1 - sqrtf(2));\n auto d = 8 * (2 - sqrtf(2)) * z * z + 2 * (2 - 7 * sqrtf(2)) * (x * x + y * y);\n auto e = -16 * sqr(sqr(z)) + 8 * (1 + 2 * sqrtf(2)) * sqr(z) - 1 + 12 * sqrtf(2);\n return 0.5f+(64*(x*x-1)*(y*y-1)*a*b - sqr(c+d+e));"
+    },
+    {
+        "name": "Barth",
+        "dtype": "FLOAT",
+        "boxsize": 3,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto zp = z + 0.5f;\n auto phi = (1 + sqrtf(5)) / 2;\n auto x2 = x * x; auto y2 = y * y; auto z2 = zp * 2; auto phi2 = phi * phi;\n return 0.5f+(4*(phi2*x2-y2)*(phi2*y2-z2)*(phi2*z2-x2) - (1+2*phi)*sqr(x2+y2+z2-1));"
+    },
+    {
+        "name": "Heart",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = x * x, y2 = y * y, z2 = z * 2;\n return implicit2Density(cb(2*x2+2*y2+z2-1) - 0.1f*x2*z2*z - y2*z2*z);"
+    },
+    {
+        "name": "Kleine",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = 25 * x * x, y2 = 25 * y * y, z2 = 5 * z * 2;\n return 0.5f - 0.01f*((x2+y2+z2+10*y-1)*sqr(x2+y2+z2-10*y-1)-8*z2+400*x*y*(x2+y2+z2-10*y-1));"
+    },
+    {
+        "name": "Cassini",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {"a": 0.25},
+        "codeForward": "return implicit2Density((sqr(x+p.a)+y*y)*(sqr(x-p.a)+y*y) - z*z);"
+    },
+    {
+        "name": "Steiner",
+        "dtype": "FLOAT",
+        "boxsize": 1,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = x * x, y2 = y * y, z2 = z * 2;\n return implicit2Density(x2*y2+x2*z2+y2*z2-2*x*y*z);"
+    },
+    {
+        "name": "CrossCap",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = x * x, y2 = y * y, z2 = z * 2;\n return implicit2Density(4*x2*(x2+y2*z2+z)+y2*(y2+z2-1));"
+    },
+    {
+        "name": "Kummer",
+        "dtype": "FLOAT",
+        "boxsize": 4,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = x * x, y2 = y * y, z2 = z * 2;\n return implicit2Density(x2*x2+y2*y2+z2*z2-x2-y2-z2-x2*y2-y2*z2-z2*x2+1);"
+    },
+    {
+        "name": "Blobby",
+        "dtype": "FLOAT",
+        "boxsize": 4,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto x2 = x * x, y2 = y * y, z2 = z * 2;\n return implicit2Density(x2+y2*z2+sinf(4*x)-cosf(4*y)+sinf(4*z)-1);"
+    },
+    {
+        "name": "Tube",
+        "dtype": "FLOAT",
+        "boxsize": 2,
+        "valuemin": 0,
+        "valuemax": 1,
+        "parameters": {},
+        "codeForward": "auto r = sqrtf(y * y + z * z);\n return ((1 - (r * cb(0.9f - 0.5f * cosf(7 * x)))) - 0.9f) * 10;"
+    }
+]

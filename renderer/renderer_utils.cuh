@@ -105,6 +105,12 @@ namespace kernel
 	}
 
 	template<typename Tensor>
+	__host__ __device__ __forceinline__ real2 fetchReal2(const Tensor& t, int b)
+	{
+		return make_real2(t[b][0], t[b][1]);
+	}
+
+	template<typename Tensor>
 	__host__ __device__ __forceinline__ real3 fetchReal3(const Tensor& t, int b)
 	{
 		return make_real3(t[b][0], t[b][1], t[b][2]);
@@ -118,6 +124,11 @@ namespace kernel
 	__host__ __device__ __forceinline__ real3 fetchReal3(const Tensor& t, int b, int y, int x)
 	{
 		return make_real3(t[b][y][x][0], t[b][y][x][1], t[b][y][x][2]);
+	}
+	template<typename Tensor>
+	__host__ __device__ __forceinline__ real4 fetchReal4(const Tensor& t, int b)
+	{
+		return make_real4(t[b][0], t[b][1], t[b][2], t[b][3]);
 	}
 	template<typename Tensor>
 	__host__ __device__ __forceinline__ real4 fetchReal4(const Tensor& t, int b, int i)
@@ -159,6 +170,22 @@ namespace kernel
 		t[b][y][x][0] = v.x;
 		t[b][y][x][1] = v.y;
 		t[b][y][x][2] = v.z;
+	}
+	template<typename V4, typename Tensor>
+	__host__ __device__ __forceinline__ void writeReal4(const V4& v, Tensor& t, int b)
+	{
+		t[b][0] = v.x;
+		t[b][1] = v.y;
+		t[b][2] = v.z;
+		t[b][3] = v.w;
+	}
+	template<typename V4, typename Tensor>
+	__host__ __device__ __forceinline__ void writeReal4(const V4& v, Tensor& t, int b, int i)
+	{
+		t[b][i][0] = v.x;
+		t[b][i][1] = v.y;
+		t[b][i][2] = v.z;
+		t[b][i][3] = v.w;
 	}
 	template<typename V4, typename Tensor>
 	__host__ __device__ __forceinline__ void writeReal4(const V4& v, Tensor& t, int b, int y, int x)

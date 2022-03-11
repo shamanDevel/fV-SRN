@@ -1,3 +1,8 @@
+/*
+ * OLD, replaced by volume_interpolation_implicit.
+ * Kept here for reference (CPU path)
+ */
+
 #include "volume.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -135,13 +140,13 @@ namespace {
 
 	struct ImplicitEquation_KLEINE //sextic
 	{
-		static constexpr float boxMin = -5;
-		static constexpr float boxMax = +5;
+		static constexpr float boxMin = -1;
+		static constexpr float boxMax = +1;
 		static float eval(float x, float y, float z, const std::unordered_map<std::string, float>& params)
 		{
-			float x2 = x * x, y2 = y * y, z2 = z * 2;
-			return 0.5f + -(
-				(x2+y2+z2+2*y-1)*sqr(x2+y2+z2-2*y-1)-8*z2+16*x*y*(x2+y2+z2-2*y-1));
+			float x2 = 25 * x * x, y2 = 25 * y * y, z2 = 5 * z * 2;
+			return 0.5f -(
+				(x2+y2+z2+10*y-1)*sqr(x2+y2+z2-10*y-1)-8*z2+400*x*y*(x2+y2+z2-10*y-1));
 		}
 	};
 

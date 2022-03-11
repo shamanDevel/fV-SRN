@@ -65,16 +65,16 @@ renderer::TransferFunctionTexture::TransferFunctionTexture()
 
 renderer::TransferFunctionTexture::~TransferFunctionTexture()
 {
-    CUMAT_SAFE_CALL(cudaDestroyTextureObject(textureObject_));
-	CUMAT_SAFE_CALL(cudaFreeArray(textureArray_));
+    CUMAT_SAFE_CALL_NO_THROW(cudaDestroyTextureObject(textureObject_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaFreeArray(textureArray_));
 
-	CUMAT_SAFE_CALL(cudaDestroyTextureObject(preintegrationCudaTexture1D_));
-	CUMAT_SAFE_CALL(cudaDestroySurfaceObject(preintegrationCudaSurface1D_));
-	CUMAT_SAFE_CALL(cudaFreeArray(preintegrationCudaArray1D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaDestroyTextureObject(preintegrationCudaTexture1D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaDestroySurfaceObject(preintegrationCudaSurface1D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaFreeArray(preintegrationCudaArray1D_));
 
-	CUMAT_SAFE_CALL(cudaDestroyTextureObject(preintegrationCudaTexture2D_));
-	CUMAT_SAFE_CALL(cudaDestroySurfaceObject(preintegrationCudaSurface2D_));
-	CUMAT_SAFE_CALL(cudaFreeArray(preintegrationCudaArray2D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaDestroyTextureObject(preintegrationCudaTexture2D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaDestroySurfaceObject(preintegrationCudaSurface2D_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaFreeArray(preintegrationCudaArray2D_));
 }
 
 std::string renderer::TransferFunctionTexture::Name()
@@ -123,7 +123,9 @@ bool renderer::TransferFunctionTexture::drawUI(UIStorage_t& storage)
 	if (const auto& it = storage.find(VolumeInterpolationGrid::UI_KEY_HISTOGRAM);
 		it != storage.end())
 	{
-		histogram = std::any_cast<Volume::Histogram_ptr>(it->second);
+		histogram = it->second.has_value()
+			? std::any_cast<Volume::Histogram_ptr>(it->second)
+			: nullptr;
 	}
 	if (histogram) {
 		double minDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MIN_DENSITY, 0.0);
@@ -131,7 +133,10 @@ bool renderer::TransferFunctionTexture::drawUI(UIStorage_t& storage)
 		auto histogramRes = (histogram->maxDensity - histogram->minDensity) / histogram->getNumOfBins();
 		int histogramBeginOffset = (minDensity - histogram->minDensity) / histogramRes;
 		int histogramEndOffset = (histogram->maxDensity - maxDensity) / histogramRes;
-		auto maxFractionVal = *std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset);
+		auto maxFractionVal =
+			(histogramEndOffset > histogramBeginOffset)
+			? *std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset)
+			: 1.0f;
 		ImGui::PlotHistogram("", histogram->bins + histogramBeginOffset, histogram->getNumOfBins() - histogramEndOffset - histogramBeginOffset,
 			0, NULL, 0.0f, maxFractionVal, ImVec2(tfEditorOpacityWidth, tfEditorOpacityHeight));
 	}

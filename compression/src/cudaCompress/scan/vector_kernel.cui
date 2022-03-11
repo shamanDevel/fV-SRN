@@ -1,0 +1,154 @@
+// -------------------------------------------------------------
+// CUDPP -- CUDA Data Parallel Primitives library
+// -------------------------------------------------------------
+//  $Revision: 5636 $
+//  $Date: 2009-07-02 13:39:38 +1000 (Thu, 02 Jul 2009) $
+// ------------------------------------------------------------- 
+// This source code is distributed under the terms of license.txt in
+// the root directory of this source distribution.
+// ------------------------------------------------------------- 
+
+/**
+ * @file
+ * vector_kernel.cu
+ * 
+ * @brief CUDA kernel methods for basic operations on vectors.  
+ * 
+ * CUDA kernel methods for basic operations on vectors.  
+ * 
+ * Examples: 
+ * - vectorAddConstant(): d_vector + constant 
+ * - vectorAddUniform():  d_vector + uniform (per-block constants)
+ * - vectorAddVector():   d_vector + d_vector
+ */
+
+// MJH: these functions assume there are 2N elements for N threads.  
+// Is this always going to be a good idea?  There may be cases where
+// we have as many threads as elements, but for large problems
+// we are probably limited by max CTA size for simple kernels like 
+// this so we should process multiple elements per thread.
+// we may want to extend these with looping versions that process 
+// many elements per thread.
+
+#include <cudaCompress/cudaUtil.h>
+
+
+namespace cudaCompress {
+
+/** \addtogroup cudpp_kernel
+  * @{
+  */
+
+ /** @brief Add a uniform value to each data element of an array
+  *
+  * This function reads one value per CTA from \a d_uniforms into shared
+  * memory and adds that value to all values "owned" by the CTA in \a
+  * d_vector.  Each thread adds two pairs of values.
+  *
+  * @param[out] d_vector The d_vector whose values will have the uniform added
+  * @param[in] d_uniforms The array of uniform values (one per CTA)
+  * @param[in] numElements The number of elements in \a d_vector to process
+  * @param[in] blockOffset an optional offset to the beginning of this block's
+  * data.
+  * @param[in] baseIndex an optional offset to the beginning of the array 
+  * within \a d_vector.
+  */
+template <class T>
+__global__ void vectorAddUniform(T       *d_vector, 
+                                 const T *d_uniforms, 
+                                 int     numElements, 
+                                 int     blockOffset, 
+                                 int     baseIndex)
+{
+    __shared__ T uni;
+    // Get this block's uniform value from the uniform array in device memory
+    // We store it in shared memory so that the hardware's shared memory 
+    // broadcast capability can be used to share among all threads in each warp
+    // in a single cycle
+    if (threadIdx.x == 0)
+    {
+        uni = d_uniforms[blockIdx.x + (gridDim.x * blockIdx.y) + blockOffset];
+    }
+
+    // Compute this thread's output address
+    int width = (gridDim.x * (blockDim.x << 1));
+
+    unsigned int address = baseIndex + (width * blockIdx.y)
+        + threadIdx.x + (blockIdx.x * (blockDim.x << 1)); 
+
+    __syncthreads();
+
+    // note two adds per thread: one in first half of the block, one in last
+    d_vector[address]              += uni;
+    if (threadIdx.x + blockDim.x < numElements) d_vector[address + blockDim.x] += uni;
+}
+
+
+/** @brief Add a uniform value to each data element of an array (vec4 version)
+  *
+  * This function reads one value per CTA from \a d_uniforms into shared
+  * memory and adds that value to all values "owned" by the CTA in \a d_vector.  
+  * Each thread adds the uniform value to eight values in \a d_vector.
+  *
+  * @param[out] d_vector The d_vector whose values will have the uniform added
+  * @param[in] d_uniforms The array of uniform values (one per CTA)
+  * @param[in] numElements The number of elements in \a d_vector to process
+  * @param[in] vectorRowPitch For 2D arrays, the pitch (in elements) of the 
+  * rows of \a d_vector.
+  * @param[in] uniformRowPitch For 2D arrays, the pitch (in elements) of the 
+  * rows of \a d_uniforms.
+  * @param[in] blockOffset an optional offset to the beginning of this block's
+  * data.
+  * @param[in] baseIndex an optional offset to the beginning of the array 
+  * within \a d_vector.
+  */
+template <class T, class Oper, int elementsPerThread, bool fullBlocks>
+__global__ void vectorAddUniform4(T       *d_vector, 
+                                  const T *d_uniforms, 
+                                  int      numElements,             
+                                  int      vectorRowPitch,     // width of input array in elements
+                                  int      uniformRowPitch,    // width of uniform array in elements
+                                  int      blockOffset, 
+                                  int      baseIndex)
+{
+    __shared__ T uni;
+    // Get this block's uniform value from the uniform array in device memory
+    // We store it in shared memory so that the hardware's shared memory 
+    // broadcast capability can be used to share among all threads in each warp
+    // in a single cycle
+    if (threadIdx.x == 0)
+    {
+        uni = d_uniforms[blockIdx.x + (uniformRowPitch * blockIdx.y) + blockOffset];
+    }
+
+    // Compute this thread's output address
+    unsigned int address = baseIndex + (vectorRowPitch * blockIdx.y)
+        + threadIdx.x + (blockIdx.x * (blockDim.x * elementsPerThread)); 
+    numElements += (vectorRowPitch * blockIdx.y);
+
+    __syncthreads();
+
+    // create the operator functor
+    Oper op;
+#if 1
+    #pragma unroll
+    for (int i = 0; i < elementsPerThread && (fullBlocks || address < numElements); i++)
+    {
+        d_vector[address] = op(d_vector[address], uni);
+        address += blockDim.x;
+    }
+#else
+    for (int i = 0; i < elementsPerThread; i++)
+    {
+        if (!fullBlocks && address >= numElements) return;
+
+        d_vector[address] = op(d_vector[address], uni);
+        address += blockDim.x;
+    }
+#endif
+}
+
+/** @} */ // end d_vector functions
+/** @} */ // end cudpp_kernel
+
+}

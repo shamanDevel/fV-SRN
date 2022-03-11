@@ -54,6 +54,13 @@ public:
 	virtual double getMaxAbsorption() const = 0;
 
 	/**
+	 * Checks, if the TF requires gradients for evaluation.
+	 * If this returns true and and no gradients are passed
+	 * to \ref evaluate, the latter method will throw an error.
+	 */
+	virtual bool requiresGradients() const;
+
+	/**
 	 * Evaluates the transfer function for the specified density (1D).
 	 * First, the input densities are mapped from [densityMin, densityMax] to [0,1],
 	 * then sent to the TF. For densities < densityMin, the color is (0,0,0,0),
@@ -66,12 +73,14 @@ public:
 	 * \param densityMax the maximal density
 	 * \param previousDensity the previous density for pre-integration
 	 * \param stepsize the current stepsize
+	 * \param gradient the density gradient
 	 * \return the resulting color values of shape (B,4)
 	 */
 	virtual torch::Tensor evaluate(const torch::Tensor& density,
 		double densityMin, double densityMax,
 		const std::optional<torch::Tensor>& previousDensity,
 		const std::optional<double>& stepsize,
+		const std::optional<torch::Tensor>& gradient,
 		CUstream stream);
 
 	void fillConstantMemory(const GlobalSettings& s, CUdeviceptr ptr, CUstream stream) override;

@@ -57,6 +57,7 @@ Volume::MipmapLevel::MipmapLevel(Feature* parent, uint64_t sizeX, uint64_t sizeY
     , sizeY_(sizeY)
 	, sizeZ_(sizeZ), dataCpu_(new char[parent->numChannels() * sizeX * sizeY * sizeZ * BytesPerType[parent->type()]]), dataGpu_(nullptr)
 	, dataTexLinear_(0), dataTexNearest_(0)
+	, dataSurface_(0)
 	, cpuDataCounter_(0)
 	, gpuDataCounter_(0)
 	, parent_(parent)
@@ -99,6 +100,12 @@ cudaTextureObject_t Volume::MipmapLevel::dataTexGpuNearest() const
     return dataTexNearest_;
 }
 
+cudaSurfaceObject_t Volume::MipmapLevel::gpuSurface() const
+{
+	if (!checkHasGpu()) return 0;
+	return dataSurface_;
+}
+
 void Volume::MipmapLevel::copyCpuToGpu()
 {
 	if (channels_ != 1 && channels_ != 2 && channels_ != 4)
@@ -130,11 +137,15 @@ void Volume::MipmapLevel::copyCpuToGpu()
 	params.kind = cudaMemcpyHostToDevice;
 	CUMAT_SAFE_CALL(cudaMemcpy3D(&params));
 
-	//create texture object
 	cudaResourceDesc resDesc;
 	memset(&resDesc, 0, sizeof(cudaResourceDesc));
 	resDesc.resType = cudaResourceTypeArray;
 	resDesc.res.array.array = dataGpu_;
+
+	//create surface
+	CUMAT_SAFE_CALL(cudaCreateSurfaceObject(&dataSurface_, &resDesc));
+
+	//create texture object
 	cudaTextureDesc texDesc;
 	memset(&texDesc, 0, sizeof(cudaTextureDesc));
 	texDesc.addressMode[0] = cudaAddressModeClamp;
@@ -157,7 +168,6 @@ void Volume::MipmapLevel::copyCpuToGpu()
 
 void Volume::MipmapLevel::clearGpuResources()
 {
-
 	if (dataTexLinear_ != 0) {
 		CUMAT_SAFE_CALL_NO_THROW(cudaDestroyTextureObject(dataTexLinear_));
 		dataTexLinear_ = 0;
@@ -165,6 +175,11 @@ void Volume::MipmapLevel::clearGpuResources()
 	if (dataTexNearest_ != 0) {
 		CUMAT_SAFE_CALL_NO_THROW(cudaDestroyTextureObject(dataTexNearest_));
 		dataTexNearest_ = 0;
+	}
+	if (dataSurface_ != 0)
+	{
+		CUMAT_SAFE_CALL_NO_THROW(cudaDestroySurfaceObject(dataSurface_));
+		dataSurface_ = 0;
 	}
 	if (dataGpu_ != nullptr) {
 		CUMAT_SAFE_CALL_NO_THROW(cudaFreeArray(dataGpu_));
@@ -183,8 +198,11 @@ torch::Tensor ToTensor(const Volume::MipmapLevel* l, float scale)
 	torch::Tensor t = torch::zeros({ C, X, Y, Z }, 
 		at::TensorOptions().dtype(c10::kFloat));
 	auto acc = t.accessor<float, 4>();
-	for (int z = 0; z < Z; ++z) for (int y = 0; y < Y; ++y) for (int x = 0; x < X; ++x) for (int c = 0; c < C; ++c)
-		acc[c][x][y][z] = static_cast<float>(data[l->idx(x, y, z, c)]) * scale;
+#pragma omp parallel for
+	for (int z = 0; z < Z; ++z) {
+		for (int y = 0; y < Y; ++y) for (int x = 0; x < X; ++x) for (int c = 0; c < C; ++c)
+			acc[c][x][y][z] = static_cast<float>(data[l->idx(x, y, z, c)]) * scale;
+	}
 	return t;
 }
 
@@ -212,9 +230,15 @@ void FromTensor(Volume::MipmapLevel* l, const torch::Tensor& t, float scale)
 	const int X = l->sizeX();
 	const int Y = l->sizeY();
 	const int Z = l->sizeZ();
+	const float low = std::numeric_limits<T>::lowest();
+	const float high = std::numeric_limits<T>::max();
 	const auto acc = t.packed_accessor64<float, 4>();
-	for (int z = 0; z < Z; ++z) for (int y = 0; y < Y; ++y) for (int x = 0; x < X; ++x) for (int c = 0; c < C; ++c)
-		data[l->idx(x, y, z, c)] = static_cast<T>(acc[c][x][y][z] * scale);
+#pragma omp parallel for
+	for (int z = 0; z < Z; ++z) {
+		for (int y = 0; y < Y; ++y) for (int x = 0; x < X; ++x) for (int c = 0; c < C; ++c)
+			data[l->idx(x, y, z, c)] = static_cast<T>(
+				std::max(low, std::min(high, acc[c][x][y][z] * scale)));
+	}
 }
 
 void Volume::MipmapLevel::fromTensor(const torch::Tensor& t)
@@ -241,6 +265,7 @@ void Volume::MipmapLevel::fromTensor(const torch::Tensor& t)
 	default:
 		throw std::runtime_error("Unknown enum constant");
 	}
+	cpuDataCounter_++;
 }
 
 Volume::Feature::Feature(Volume* parent, const std::string& name, DataType type, int numChannels, uint64_t sizeX,

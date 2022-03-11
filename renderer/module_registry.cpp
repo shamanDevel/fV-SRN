@@ -16,6 +16,7 @@
 #include "irasterization.h"
 #include "pytorch_functions.h"
 #include "volume_interpolation_network.h"
+#include "volume_interpolation_implicit.h"
 
 renderer::ModuleRegistry::ModuleRegistry()
 	: workingDirectory_(absolute(std::filesystem::path(".")))
@@ -125,6 +126,7 @@ void renderer::ModuleRegistry::populateModules()
 	REGISTER(PhaseFunctionHenyeyGreenstein);
 	REGISTER(PhaseFunctionRayleigh);
 	REGISTER(VolumeInterpolationNetwork);
+	REGISTER(VolumeInterpolationImplicit);
 }
 
 const std::vector<std::pair<renderer::IModule_ptr, renderer::ModuleRegistry::ModuleCreationFunction_t>>& 

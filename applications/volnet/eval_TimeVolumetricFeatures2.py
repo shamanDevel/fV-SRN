@@ -123,6 +123,28 @@ def collect_configurations():
             config[0], network[0], fourier[0], volumetricFeatures[0] + "-steady", 'direct')
         cfgs.append((config[1], network[1:], fourier[1], volFeaturesArgs, timeArgs, filename))
 
+    # special: Lu&Berger network
+    for network, fourier, volumetricFeatures in itertools.product(networkX, fourierX, volumetricFeaturesX):
+        g, c = volumetricFeatures[2]
+        f = fourier[1][1]
+        from volnet.eval_CompressionTeaser import getNetworkParameterCount, findNetworkDimension
+        hybrid_parameters = getNetworkParameterCount(
+            c, f, network[1], network[2], 1)
+        target_memory = g ** 3 * c + 2 * hybrid_parameters  # 1byte for voxel, 2byte for weights
+        onlynet_layer_str, onlynet_num_parameters = findNetworkDimension(target_memory // 2, 1)
+        onlynet_args = [
+            "--layers", onlynet_layer_str,
+            "--train:batchsize", "64*64*32",
+            "--activation", "ResidualSine",  # Lu et al. uses Residual-Sine blocks and no fourier features
+            "--fouriercount", "0",
+            '-lr', '0.00005',
+            '--use_time_direct'
+        ]
+        for config in configX:
+            filename = "TimeVolumetricLatentSpace2-%s-%s-%s-%s-%s" % (
+                config[0], network[0], fourier[0], volumetricFeatures[0] + "-LuBerger", 'LuBerger')
+            cfgs.append((config[1], network[1:], fourier[1], onlynet_args, [], filename))
+
     return cfgs
 
 def get_args_and_hdf5_file(cfg):
@@ -303,9 +325,13 @@ def eval(configs):
             print("File not found:", filename, file=sys.stderr)
             return None, None
         try:
-            ln = LoadedModel(filename)
+            ln = LoadedModel(filename, force_config_file=cfg[0][0],
+                             grid_encoding=pyrenderer.SceneNetwork.LatentGrid.ByteLinear)
             if enable_preintegration:
+                ln.get_image_evaluator().ray_evaluator.convert_to_texture_tf()
                 ln.enable_preintegration(True)
+            else:
+                ln.enable_preintegration(False)
             ln.save_compiled_network(filename.replace('.hdf5', '.volnet'))
             return ln, output_name
         except Exception as e:
@@ -426,7 +452,7 @@ def eval(configs):
                     image_evaluator = base_ln.get_input_data().default_image_evaluator()
                     image_evaluator.volume.setSource(new_volume, 0)
                     image_evaluator.camera.set_parameters(cameras[cam])
-                    image_evaluator.ray_evaluator.stepsizeIsObjectSpace = False
+                    #image_evaluator.ray_evaluator.stepsizeIsObjectSpace = False
                     image_evaluator.ray_evaluator.stepsize = STEPSIZE
                     if timer is not None:
                         timer.start()
@@ -565,6 +591,14 @@ def make_plots(statistics_file):
                 config[0], network[0], fourier[0], volumetricFeatures[0], "steady-direct")
             # human_name = f"Net.: {network[1]}^{network[2]}, Grid: ${volumetricFeatures[2][0]}^3$*{volumetricFeatures[2][1]}, Time: {time[0]}"
             human_name = f"Grid: ${volumetricFeatures[2][0]}^3$*{volumetricFeatures[2][1]}, fixed in time"
+            networkKeys.append((filename, human_name))
+        # neurcomp
+        for network, fourier, volumetricFeatures in itertools.product(
+                networkX, fourierX, volumetricFeaturesX_filtered):
+            filename = "TimeVolumetricLatentSpace2-%s-%s-%s-%s-%s" % (
+                config[0], network[0], fourier[0], volumetricFeatures[0], "LuBerger-LuBerger")
+            # human_name = f"Net.: {network[1]}^{network[2]}, Grid: ${volumetricFeatures[2][0]}^3$*{volumetricFeatures[2][1]}, Time: {time[0]}"
+            human_name = f"neurcomp ~ ${volumetricFeatures[2][0]}^3$*{volumetricFeatures[2][1]}"
             networkKeys.append((filename, human_name))
         # only grid
         grid_only_combinations = volumetricFeaturesX_filtered + [("G%dC1"%config[2], None, (config[2], 1))] # base resolution

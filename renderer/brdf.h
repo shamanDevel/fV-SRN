@@ -24,6 +24,19 @@ public:
 	static constexpr std::string_view TAG = "brdf";
 	std::string getTag() const override { return std::string(TAG); }
 	static std::string Tag() { return std::string(TAG); }
+
+	/**
+	 * Evaluates the BRDF at the given position and color.
+	 * All tensors are of shape (B,C)
+	 */
+	virtual torch::Tensor evaluate(
+		const torch::Tensor& rgba,
+		const torch::Tensor& position,
+		const torch::Tensor& gradient,
+		const torch::Tensor& rayDir,
+		CUstream stream);
+protected:
+    void registerPybindModule(pybind11::module& m) override;
 };
 typedef std::shared_ptr<IBRDF> IBRDF_ptr;
 
@@ -62,10 +75,12 @@ class BRDFLambert : public IBRDF
 	Parameter<double> magnitudeRadius_;
 	Parameter<int> specularExponent_;
 
+public:
 	enum class LightType
 	{
 		Point, Directional
 	};
+private:
 	bool lightFollowsCamera_;
 	LightType lightType_;
 	Parameter<double3> lightPosition_;
@@ -81,8 +96,7 @@ class BRDFLambert : public IBRDF
 public:
 	BRDFLambert();
 
-
-	[[nodiscard]] std::string getName() const override;
+    [[nodiscard]] std::string getName() const override;
 	[[nodiscard]] bool drawUI(UIStorage_t& storage) override;
 	void load(const nlohmann::json& json, const ILoadingContext* context) override;
 	void save(nlohmann::json& json, const ISavingContext* context) const override;
@@ -101,6 +115,127 @@ public:
 
 private:
 	bool updateLightFromCamera(const GlobalSettings& s);
+
+public:
+    [[nodiscard]] bool enableMagnitudeScaling() const
+    {
+        return enableMagnitudeScaling_;
+    }
+
+    [[nodiscard]] Parameter<double> magnitudeScaling() const
+    {
+        return magnitudeScaling_;
+    }
+
+    [[nodiscard]] bool enablePhong() const
+    {
+        return enablePhong_;
+    }
+
+    [[nodiscard]] Parameter<double> ambient() const
+    {
+        return ambient_;
+    }
+
+    [[nodiscard]] Parameter<double> specular() const
+    {
+        return specular_;
+    }
+
+    [[nodiscard]] Parameter<double> magnitudeCenter() const
+    {
+        return magnitudeCenter_;
+    }
+
+    [[nodiscard]] Parameter<double> magnitudeRadius() const
+    {
+        return magnitudeRadius_;
+    }
+
+    [[nodiscard]] Parameter<int> specularExponent() const
+    {
+        return specularExponent_;
+    }
+
+    [[nodiscard]] bool lightFollowsCamera() const
+    {
+        return lightFollowsCamera_;
+    }
+
+    [[nodiscard]] LightType lightType() const
+    {
+        return lightType_;
+    }
+
+    [[nodiscard]] Parameter<double3> lightPosition() const
+    {
+        return lightPosition_;
+    }
+
+    [[nodiscard]] Parameter<double3> lightDirection() const
+    {
+        return lightDirection_;
+    }
+
+    void setEnableMagnitudeScaling(const bool enable_magnitude_scaling)
+    {
+        enableMagnitudeScaling_ = enable_magnitude_scaling;
+    }
+
+    void setMagnitudeScaling(const Parameter<double>& magnitude_scaling)
+    {
+        magnitudeScaling_ = magnitude_scaling;
+    }
+
+    void setEnablePhong(const bool enable_phong)
+    {
+        enablePhong_ = enable_phong;
+    }
+
+    void setAmbient(const Parameter<double>& ambient)
+    {
+        ambient_ = ambient;
+    }
+
+    void setSpecular(const Parameter<double>& specular)
+    {
+        specular_ = specular;
+    }
+
+    void setMagnitudeCenter(const Parameter<double>& magnitude_center)
+    {
+        magnitudeCenter_ = magnitude_center;
+    }
+
+    void setMagnitudeRadius(const Parameter<double>& magnitude_radius)
+    {
+        magnitudeRadius_ = magnitude_radius;
+    }
+
+    void setSpecularExponent(const Parameter<int>& specular_exponent)
+    {
+        specularExponent_ = specular_exponent;
+    }
+
+    void setLightFollowsCamera(const bool light_follows_camera)
+    {
+        lightFollowsCamera_ = light_follows_camera;
+    }
+
+    void setLightType(const LightType light_type)
+    {
+        lightType_ = light_type;
+    }
+
+    void setLightPosition(const Parameter<double3>& light_position)
+    {
+        lightPosition_ = light_position;
+    }
+
+    void setLightDirection(const Parameter<double3>& light_direction)
+    {
+        lightDirection_ = light_direction;
+    }
 };
 
 

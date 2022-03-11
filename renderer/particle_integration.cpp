@@ -193,8 +193,9 @@ void renderer::ParticleIntegration::particlesSeedAndAdvect(double deltaTime, con
     includes << "#include \"renderer_particle_integration_kernels.cuh\"\n";
 
     std::stringstream sourceFile;
-    sourceFile << "// DEFINES:\n" << defines.str()
-        << "\n// INCLUDES:\n" << includes.str();
+    sourceFile << "// DEFINES:\n" << defines.str() << "\n";
+    volume->fillExtraSourceCode(s, sourceFile);
+    sourceFile << "\n// INCLUDES:\n" << includes.str() << "\n";
 
     //create kernel
     const auto seedKernel = KernelLoader::Instance().getKernelFunction(

@@ -1,0 +1,81 @@
+#include "scan_globals.h"
+
+#include "scan_cta.cui"
+
+
+namespace cudaCompress {
+
+/**
+  * @brief Main scan kernel
+  *
+  * This __global__ device function performs one level of a multiblock scan on 
+  * an arbitrary-dimensioned array in \a d_in, returning the result in \a d_out 
+  * (which may point to the same array).  The same function may be used for
+  * single or multi-row scans.
+  * 
+  * This function peforms one level of a recursive, multiblock scan.  At the 
+  * app level, this function is called by cudppScan and cudppMultiScan and used 
+  * in combination with vectorAddUniform4() to produce a complete scan.
+  *
+  * Template parameter \a T is the datatype of the array to be scanned. 
+  * Template parameter \a traits is the ScanTraits struct containing 
+  * compile-time options for the scan, such as whether it is forward or 
+  * backward, exclusive or inclusive, multi- or single-row, etc.
+  * 
+  * @param[out] d_out The output (scanned) array
+  * @param[in]  d_in The input array to be scanned
+  * @param[out] d_blockSums The array of per-block sums
+  * @param[in]  numElements The number of elements to scan
+  */
+template<typename TIn, typename TOut, class traits> 
+__global__ void scan4(TOut*        d_out,
+                      const TIn*   d_in,
+                      TOut*        d_blockSums,
+                      int          numElements, 
+                      unsigned int dataRowPitch,
+                      unsigned int blockSumRowPitch)
+{
+    extern __shared__ TOut temp[];
+
+    int devOffset, ai, bi, aiDev, biDev;
+    TOut threadScan[2][4];
+
+    unsigned int blockN = numElements;
+    unsigned int blockSumIndex = blockIdx.x;
+
+    if (traits::isMultiRow())
+    {
+        int yIndex     = blockDim.y * blockIdx.y + threadIdx.y;
+        devOffset      = dataRowPitch * yIndex;
+        blockN        += (devOffset << 2);
+        devOffset     += blockIdx.x * (blockDim.x << 1);
+        blockSumIndex += (blockSumRowPitch << 2) * yIndex;
+    }
+    else
+    {
+        devOffset = blockIdx.x * (blockDim.x << 1);
+    }
+
+    // load data into shared memory
+    // for exclusive scan, don't load last element of input
+    // (not needed, and might not be allocated...)
+    if(traits::isExclusive())
+    {
+        if(blockIdx.x == gridDim.x - 1) --blockN;
+    }
+    loadSharedChunkFromMem4<TIn, TOut, traits>
+        (temp, threadScan, d_in, blockN, devOffset, ai, bi, aiDev, biDev);
+    if(traits::isExclusive())
+    {
+        if(blockIdx.x == gridDim.x - 1) ++blockN;
+    }
+
+    scanCTA<TOut, traits>(temp, d_blockSums, blockSumIndex);
+
+    // write results to device memory
+    storeSharedChunkToMem4<TOut, traits>
+        (d_out, threadScan, temp, blockN, devOffset, ai, bi, aiDev, biDev);    
+
+}
+
+}

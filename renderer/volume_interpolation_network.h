@@ -56,19 +56,52 @@ struct OutputParametrization
 {
 	enum OutputMode
 	{
-	    DENSITY,
+		DENSITY,
 		DENSITY_DIRECT,
 		RGBO,
 		RGBO_DIRECT,
+		DENSITY_GRADIENT,
+		DENSITY_GRADIENT_DIRECT,
+		DENSITY_GRADIENT_CUBIC,
+		DENSITY_CURVATURE, //density+gradient+curvature
+		DENSITY_CURVATURE_DIRECT,
 		_NUM_OUTPUT_MODES_
 	};
 	static const std::string OutputModeNames[_NUM_OUTPUT_MODES_]; //match the python def.
-	static const int OutputModeNumChannels[_NUM_OUTPUT_MODES_];
+	static const int OutputModeNumChannelsIn[_NUM_OUTPUT_MODES_];
+	static const int OutputModeNumChannelsOut[_NUM_OUTPUT_MODES_];
 	OutputMode outputMode = DENSITY;
 	static OutputMode OutputModeFromString(const std::string& s);
 
-	int channelsIn() const;
-	int channelsOut() const;
+	[[nodiscard]] int channelsIn() const;
+	[[nodiscard]] int channelsOut() const;
+
+	[[nodiscard]] bool isDensity() const
+	{
+		return outputMode == DENSITY || outputMode == DENSITY_DIRECT;
+	}
+	[[nodiscard]] bool isDensityGradient() const
+	{
+		return outputMode == DENSITY_GRADIENT || outputMode == DENSITY_GRADIENT_DIRECT ||
+			outputMode == DENSITY_GRADIENT_CUBIC;
+	}
+	[[nodiscard]] bool isDensityCurvature() const
+	{
+	    return outputMode == DENSITY_CURVATURE || outputMode == DENSITY_CURVATURE_DIRECT;
+	}
+	[[nodiscard]] bool isColor() const
+	{
+		return outputMode == RGBO || outputMode == RGBO_DIRECT;
+	}
+	//supports gradients via the adjoint method or finite differences
+	[[nodiscard]] bool supportsGradients() const
+	{
+	    return isDensity() || isDensityGradient() || isDensityCurvature();
+	}
+	[[nodiscard]] bool supportsCurvature() const
+	{
+		return isDensityCurvature();
+	}
 
 private:
 	static const int VERSION;
@@ -95,7 +128,7 @@ struct Layer
 	bias_t bias;
 	enum Activation
 	{
-	    ReLU,
+		ReLU,
 		Sine,
 		Snake,
 		SnakeAlt,
@@ -111,17 +144,17 @@ struct Layer
 	Layer(int channelsIn, int channelsOut, 
 		const weights_t& weights, const bias_t& bias, Activation activation, float activationParameter)
 		: channelsIn(channelsIn),
-	    channelsOut(channelsOut),
-        weights(weights),
+		channelsOut(channelsOut),
+		weights(weights),
 		bias(bias),
 		activation(activation),
-	    activationParameter(activationParameter)
+		activationParameter(activationParameter)
 	{
 		TORCH_CHECK(channelsIn*channelsOut == weights.size(), "dimensions and weights not compatible");
 		TORCH_CHECK(channelsOut == bias.size(), "dimensions and bias not compatible");
 	}
 
-	bool valid() const;
+	bool valid(bool isOutputLayer) const;
 
 private:
 	static const int VERSION;
@@ -144,10 +177,10 @@ public:
 	/**
 	 * Describes how the latent grid is encoded in the 3D texture
 	 */
-    enum Encoding
-    {
+	enum Encoding
+	{
 		//Saved as 32-bit float without any extra parameter mapping
-        FLOAT,
+		FLOAT,
 		//Saved as 8-bit unsigned byte that is expanded to a float in [0,1] (variable 'x')
 		//by the texture hardware and then linearly mapped to the requested range (value(x))
 		//via the given offset and scale:
@@ -158,7 +191,7 @@ public:
 		//with the given mean and variance.
 		//value(x) = mean + sigma * \Theta^-1(x)
 		BYTE_GAUSSIAN,
-    };
+	};
 
 	static constexpr float ENCODING_GAUSSIAN_EPSILON = 1e-4f;
 
@@ -300,15 +333,15 @@ private:
 public:
 	LatentGridTimeAndEnsemble() = default;
 
-    LatentGridTimeAndEnsemble(int time_min, int time_num, int time_step, int ensemble_min, int ensemble_num)
-        : timeMin(time_min),
-          timeNum(time_num),
-          timeStep(time_step),
-	      timeGrids(time_num),
-          ensembleMin(ensemble_min),
-          ensembleNum(ensemble_num),
-	      ensembleGrids(ensemble_num)
-    {}
+	LatentGridTimeAndEnsemble(int time_min, int time_num, int time_step, int ensemble_min, int ensemble_num)
+		: timeMin(time_min),
+		  timeNum(time_num),
+		  timeStep(time_step),
+		  timeGrids(time_num),
+		  ensembleMin(ensemble_min),
+		  ensembleNum(ensemble_num),
+		  ensembleGrids(ensemble_num)
+	{}
 
 	[[nodiscard]] bool hasTimeGrids() const { return timeNum > 0; }
 	[[nodiscard]] bool hasEnsembleGrids() const { return ensembleNum > 0; }
@@ -325,21 +358,21 @@ public:
 	 * based on the given absolute time in [timeMin, timeMin+timeNum-1]
 	 */
 	[[nodiscard]] float interpolateTime(float time) const
-    {
+	{
 		float v = (time - timeMin) / timeStep;
 		return clamp(v, 0.f, static_cast<float>(timeNum-1));
-    }
+	}
 
 	[[nodiscard]] int interpolateEnsemble(int ensemble) const
-    {
+	{
 		return clamp(ensemble - ensembleMin, 0, ensembleNum - 1);
-    }
+	}
 
 	[[nodiscard]] LatentGrid_ptr getTimeGrid(int index)
-    {
+	{
 		TORCH_CHECK(index >= 0 && index < timeNum, "Index out of bounds");
 		return timeGrids[index];
-    }
+	}
 	[[nodiscard]] LatentGrid_cptr getTimeGrid(int index) const
 	{
 		TORCH_CHECK(index >= 0 && index < timeNum, "Index out of bounds");
@@ -416,18 +449,30 @@ typedef std::shared_ptr<SceneNetwork> SceneNetwork_ptr;
  */
 class SceneNetwork
 {
-    InputParametrization_ptr input_;
-    OutputParametrization_ptr output_;
-    std::vector<Layer_ptr> hidden_;
+public:
+	enum class GradientMode
+	{
+		OFF_OR_DIRECT,
+		FINITE_DIFFERENCES,
+		ADJOINT_METHOD,
+	};
+private:
+	InputParametrization_ptr input_;
+	OutputParametrization_ptr output_;
+	std::vector<Layer_ptr> hidden_;
 	LatentGridTimeAndEnsemble_ptr latentGrid_;
 	float currentTime_ = 0;
 	int currentEnsemble_ = 0;
 	float3 boxMin_;
 	float3 boxSize_;
 
-    //GPU cache
+	//GPU cache
 	mutable std::vector<char> cacheConstantMemory_;
 	mutable std::string cacheDefines_;
+	mutable int cacheNumWarps_ = -1;
+	mutable bool cacheFirstAndLastInSharedMemory_ = false;
+	mutable GradientMode cacheGradientMode_ = GradientMode::OFF_OR_DIRECT;
+	mutable float cacheFDStepsize_ = 0;
 
 public:
 	SceneNetwork();
@@ -482,25 +527,25 @@ public:
 	Layer_cptr getHidden(int index) const { return hidden_[index]; }
 	Layer_ptr getHidden(int index) { return hidden_[index]; }
 
-    [[nodiscard]] float3 boxMin() const
-    {
-        return boxMin_;
-    }
+	[[nodiscard]] float3 boxMin() const
+	{
+		return boxMin_;
+	}
 
-    void setBoxMin(const float3& boxMin)
-    {
-        boxMin_ = boxMin;
-    }
+	void setBoxMin(const float3& boxMin)
+	{
+		boxMin_ = boxMin;
+	}
 
-    [[nodiscard]] float3 boxSize() const
-    {
-        return boxSize_;
-    }
+	[[nodiscard]] float3 boxSize() const
+	{
+		return boxSize_;
+	}
 
-    void setBoxSize(const float3& boxSize)
-    {
-        boxSize_ = boxSize;
-    }
+	void setBoxSize(const float3& boxSize)
+	{
+		boxSize_ = boxSize;
+	}
 
 	/**
 	 * Sets the time and ensemble to be used for rendering.
@@ -508,7 +553,7 @@ public:
 	 */
 	void setTimeAndEnsemble(float time, int ensemble);
 
-    /**
+	/**
 	 * Checks if this network is valid, all layers fit together.
 	 * \return false if invalid
 	 */
@@ -519,8 +564,11 @@ public:
 	 * if this network is evaluated using tensor cores.
 	 * The number of warps is limited by the available shared memory.
 	 * This method returns a negative number if the network is too big.
+	 * \param onlySharedMemory cache all weights+biases in shared memory, not only
+	 *   the ones absolutely necessary for the tensor core implementation
+	 * \param adjoint include storage cost for intermediate results needed for adjoint differentation
 	 */
-	int computeMaxWarps(bool onlySharedMemory) const;
+	int computeMaxWarps(bool onlySharedMemory, bool adjoint) const;
 	/**
 	 * computes the number of parameters
 	 */
@@ -540,14 +588,18 @@ public:
 	 * The return type of the evaluation function
 	 */
 	std::string codeReturnType() const;
+	/**
+	 * Does the network directly predict normals/gradients?
+	 */
+	bool supportsNormals() const;
 
 public:
 	[[nodiscard]] std::string getDefines(const IKernelModule::GlobalSettings& s, 
-		int numWarps, bool firstAndLastInSharedMemory) const;
+		int numWarps, bool firstAndLastInSharedMemory, GradientMode gradientMode) const;
 	[[nodiscard]] std::vector<std::string> getIncludeFileNames(const IKernelModule::GlobalSettings& s) const;
 	[[nodiscard]] std::string getConstantDeclarationName(const IKernelModule::GlobalSettings& s) const;
 	[[nodiscard]] std::string getPerThreadType(const IKernelModule::GlobalSettings& s) const;
-	void fillConstantMemory(const IKernelModule::GlobalSettings& s, CUdeviceptr ptr, CUstream stream);
+	void fillConstantMemory(const IKernelModule::GlobalSettings& s, float fdStepsize, CUdeviceptr ptr, CUstream stream);
 };
 
 /**
@@ -562,12 +614,24 @@ class VolumeInterpolationNetwork : public IVolumeInterpolation
 		SceneNetwork_ptr network;
 		int numWarpsSharedOnly;
 		int numWarpsMixed;
+		int numWarpsSharedOnlyAdjoint;
+		int numWarpsMixedAdjoint;
 		std::string filename;
 		std::string humanname;
 	};
 	std::vector<LoadedNetwork> networks_;
 	int selectedNetwork_;
 
+	SceneNetwork::GradientMode gradientMode_;
+	float finiteDifferencesStepsize_;
+	/*
+	 * In the adjoint method, the gradients through the latent grid sampling
+	 * has still to be approximated via central differences.
+	 * This approximation is perfect for an infinite small stepsize, if one ignores rounding errors.
+	 * The final stepsize is set to
+	 *  1/(latentGridResolution * adjointLatentGridCentralDifferencesStepsizeScale_)
+	 */
+	float adjointLatentGridCentralDifferencesStepsizeScale_;
 	bool onlySharedMemory_; //true -> bias and fourier features are in shared memory, not constant
 
 	bool hasTimesteps_ = false;
@@ -575,7 +639,7 @@ class VolumeInterpolationNetwork : public IVolumeInterpolation
 	int currentEnsemble_ = 0;
 	float currentTimestep_ = 0;
 
-    //rendering intermediates
+	//rendering intermediates
 	mutable int currentNumWarps_;
 	mutable bool currentOnlyShared_;
 	mutable int currentTargetBlockSize_;
@@ -596,26 +660,41 @@ public:
 	 * Python: replaces all loaded networks by this network and activate it
 	 */
 	void setNetwork(SceneNetwork_ptr network);
+	/**
+	 * Returns the currently selected network.
+	 */
+	SceneNetwork_ptr currentNetwork() const;
 
 	bool onlySharedMemory() const { return onlySharedMemory_; }
 	void setOnlySharedMemory(bool b) { onlySharedMemory_ = b; }
+	SceneNetwork::GradientMode gradientMode() const { return gradientMode_; }
+	void setGradientMode(SceneNetwork::GradientMode m) { gradientMode_ = m; }
+	float finiteDifferencesStepsize() const { return finiteDifferencesStepsize_; }
+	void setFiniteDifferencesStepsize(float v) { finiteDifferencesStepsize_ = v; }
+	/**
+	 * The number of warps used in the current configuration (shared memory setting + gradient mode)
+	 */
+	int getCurrentNumWarps() const;
 
 	void setTimeAndEnsemble(float time, int ensemble);
-
-    [[nodiscard]] std::string getName() const override;
-    [[nodiscard]] bool drawUI(UIStorage_t& storage) override;
-    void load(const nlohmann::json& json, const ILoadingContext* fetcher) override;
-    void save(nlohmann::json& json, const ISavingContext* context) const override;
-    void prepareRendering(GlobalSettings& s) const override;
-    [[nodiscard]] GlobalSettings::VolumeOutput outputType() const override;
-    [[nodiscard]] std::optional<int> getBatches(const GlobalSettings& s) const override;
-    [[nodiscard]] std::string getDefines(const GlobalSettings& s) const override;
-    [[nodiscard]] std::vector<std::string> getIncludeFileNames(const GlobalSettings& s) const override;
-    [[nodiscard]] std::string getConstantDeclarationName(const GlobalSettings& s) const override;
-    [[nodiscard]] std::string getPerThreadType(const GlobalSettings& s) const override;
-    void fillConstantMemory(const GlobalSettings& s, CUdeviceptr ptr, CUstream stream) override;
 protected:
-    void registerPybindModule(pybind11::module& m) override;
+    void setBoxMin(const double3& boxMin) override;
+    void setBoxMax(const double3& boxMax) override;
+public:
+    [[nodiscard]] std::string getName() const override;
+	[[nodiscard]] bool drawUI(UIStorage_t& storage) override;
+	void load(const nlohmann::json& json, const ILoadingContext* fetcher) override;
+	void save(nlohmann::json& json, const ISavingContext* context) const override;
+	void prepareRendering(GlobalSettings& s) const override;
+	[[nodiscard]] GlobalSettings::VolumeOutput outputType() const override;
+	[[nodiscard]] std::optional<int> getBatches(const GlobalSettings& s) const override;
+	[[nodiscard]] std::string getDefines(const GlobalSettings& s) const override;
+	[[nodiscard]] std::vector<std::string> getIncludeFileNames(const GlobalSettings& s) const override;
+	[[nodiscard]] std::string getConstantDeclarationName(const GlobalSettings& s) const override;
+	[[nodiscard]] std::string getPerThreadType(const GlobalSettings& s) const override;
+	void fillConstantMemory(const GlobalSettings& s, CUdeviceptr ptr, CUstream stream) override;
+protected:
+	void registerPybindModule(pybind11::module& m) override;
 };
 
 END_RENDERER_NAMESPACE

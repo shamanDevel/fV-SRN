@@ -1,0 +1,198 @@
+#include <cudaCompress/util/DWTCommon.cuh>
+
+
+namespace cudaCompress {
+
+namespace util {
+
+
+#define OVERLAP_LEFT 2
+#define OVERLAP_RIGHT 1
+#define OVERLAP_TOTAL (OVERLAP_LEFT+OVERLAP_RIGHT)
+
+
+template<int blockSizeX, int blockSizeY, int blockCount>
+__global__ void forwardDWTIntXLowpassKernel2D(short* __restrict__ pDst, const short* __restrict__ pSrc, int sizeX, int sizeY, int dstRowPitch, int srcRowPitch)
+{
+    // shared storage for blockCount x 1 blocks + overlap
+    __shared__ short s_Data[blockSizeY][blockCount * blockSizeX + OVERLAP_TOTAL];
+
+
+    // LOAD
+
+    const int offsetX = (blockIdx.x * blockCount) * blockSizeX + threadIdx.x;
+    const int offsetY = blockIdx.y * blockSizeY + threadIdx.y;
+
+    if(offsetY >= sizeY)
+        return;
+
+    // offset data ptrs into correct row
+    pSrc += offsetY * srcRowPitch;
+    pDst += offsetY * dstRowPitch;
+
+
+    int globalIndex = offsetX - blockSizeX;
+    int sharedIndex = threadIdx.x + OVERLAP_LEFT - blockSizeX;
+
+    // load left halo
+    if(leftHaloTest<blockSizeX, OVERLAP_LEFT>(threadIdx.x)) { /* threadIdx.x >= blockSizeX - 2 */
+        s_Data[threadIdx.y][sharedIndex] = pSrc[mirrorLeft(globalIndex)];
+    }
+    globalIndex += blockSizeX;
+    sharedIndex += blockSizeX;
+
+    // load main data
+    #pragma unroll
+    for(int block = 0; block < blockCount; block++) {
+        s_Data[threadIdx.y][sharedIndex] = pSrc[globalIndex];
+        globalIndex += blockSizeX;
+        sharedIndex += blockSizeX;
+    }
+
+    // load right halo
+    if(rightHaloTest<blockSizeX, OVERLAP_RIGHT>(threadIdx.x)) { /* threadIdx.x < 1 */
+        s_Data[threadIdx.y][sharedIndex] = pSrc[mirrorRight(globalIndex, sizeX)];
+    }
+
+    __syncthreads();
+
+
+    // PREDICT
+
+    // left halo
+    if(isOdd(threadIdx.x) && leftHaloTest<blockSizeX, OVERLAP_LEFT>(threadIdx.x)) {
+        int index = OVERLAP_LEFT - blockSizeX + int(threadIdx.x);
+        s_Data[threadIdx.y][index] -= div2(s_Data[threadIdx.y][index - 1] + s_Data[threadIdx.y][index + 1]);
+    }
+
+    // main data
+    #pragma unroll
+    for(int block = 0; block < blockCount/2; block++) {
+        int index = OVERLAP_LEFT + 2 * block * blockSizeX + 2 * threadIdx.x + 1;
+        s_Data[threadIdx.y][index] -= div2(s_Data[threadIdx.y][index - 1] + s_Data[threadIdx.y][index + 1]);
+    }
+
+    __syncthreads();
+
+
+    // UPDATE
+
+    #pragma unroll
+    for(int block = 0; block < blockCount/2; block++) {
+        int index = OVERLAP_LEFT + 2 * block * blockSizeX + 2 * threadIdx.x;
+        s_Data[threadIdx.y][index] += div4(s_Data[threadIdx.y][index - 1] + s_Data[threadIdx.y][index + 1]);
+    }
+
+    __syncthreads();
+
+
+    // STORE
+
+    int offsetXOutput = (blockIdx.x * blockCount) * blockSizeX / 2 + threadIdx.x;
+    pDst += offsetXOutput;
+    #pragma unroll
+    for(int block = 0; block < blockCount / 2; block++) {
+        int index = OVERLAP_LEFT + 2 * (block * blockSizeX + threadIdx.x);
+        short val = s_Data[threadIdx.y][index];
+        pDst[block * blockSizeX] = val;
+    }
+}
+
+template<int blockSizeX, int blockSizeY, int blockCount>
+__global__ void forwardDWTIntYLowpassKernel2D(short* __restrict__ pDst, const short* __restrict__ pSrc, int sizeX, int sizeY, int rowPitch)
+{
+    // shared storage for 1 x blockCount blocks + overlap
+    __shared__ short s_Data[blockCount * blockSizeY + OVERLAP_TOTAL][blockSizeX];
+
+
+    // LOAD
+
+    const int offsetX = blockIdx.x * blockSizeX + threadIdx.x;
+    const int offsetY = (blockIdx.y * blockCount) * blockSizeY + threadIdx.y;
+
+    if(offsetX >= sizeX)
+        return;
+
+    // offset data ptrs into correct column
+    pSrc += offsetX;
+    pDst += offsetX;
+
+
+    int globalIndex = offsetY - blockSizeY;
+    int sharedIndex = threadIdx.y + OVERLAP_LEFT - blockSizeY;
+
+    // load left halo
+    if(leftHaloTest<blockSizeY, OVERLAP_LEFT>(threadIdx.y)) { /* threadIdx.y >= blockSizeY - 2 */
+        s_Data[sharedIndex][threadIdx.x] = pSrc[mirrorLeft(globalIndex) * rowPitch];
+    }
+    globalIndex += blockSizeY;
+    sharedIndex += blockSizeY;
+
+    // load main data
+    #pragma unroll
+    for(int block = 0; block < blockCount; block++) {
+        s_Data[sharedIndex][threadIdx.x] = pSrc[globalIndex * rowPitch];
+        globalIndex += blockSizeY;
+        sharedIndex += blockSizeY;
+    }
+
+    // load right halo
+    if(rightHaloTest<blockSizeY, OVERLAP_RIGHT>(threadIdx.y)) { /* threadIdx.x < 1 */
+        s_Data[sharedIndex][threadIdx.x] = pSrc[mirrorRight(globalIndex, sizeY) * rowPitch];
+    }
+
+    __syncthreads();
+
+
+    // PREDICT
+
+    // left halo
+    if(isOdd(threadIdx.y) && leftHaloTest<blockSizeY, OVERLAP_LEFT>(threadIdx.y)) {
+        int index = OVERLAP_LEFT - blockSizeY + int(threadIdx.y);
+        s_Data[index][threadIdx.x] -= div2(s_Data[index - 1][threadIdx.x] + s_Data[index + 1][threadIdx.x]);
+    }
+
+    // main data
+    if(isOdd(threadIdx.y)) {
+        #pragma unroll
+        for(int block = 0; block < blockCount; block++) {
+            int index = OVERLAP_LEFT + block * blockSizeY + threadIdx.y;
+            s_Data[index][threadIdx.x] -= div2(s_Data[index - 1][threadIdx.x] + s_Data[index + 1][threadIdx.x]);
+        }
+    }
+
+    __syncthreads();
+
+
+    // UPDATE
+
+    if(isEven(threadIdx.y)) {
+        #pragma unroll
+        for(int block = 0; block < blockCount; block++) {
+            int index = OVERLAP_LEFT + block * blockSizeY + threadIdx.y;
+            s_Data[index][threadIdx.x] += div4(s_Data[index - 1][threadIdx.x] + s_Data[index + 1][threadIdx.x]);
+        }
+    }
+
+    __syncthreads();
+
+
+    // STORE
+
+    if(isOdd(threadIdx.y))
+        return;
+
+    int offsetYOutput = offsetY / 2;
+    pDst += offsetYOutput * rowPitch;
+    #pragma unroll
+    for(int block = 0; block < blockCount; block++) {
+        int index = OVERLAP_LEFT + block * blockSizeY + threadIdx.y;
+        short val = s_Data[index][threadIdx.x];
+        pDst[block * blockSizeY / 2 * rowPitch] = val;
+    }
+}
+
+
+}
+
+}

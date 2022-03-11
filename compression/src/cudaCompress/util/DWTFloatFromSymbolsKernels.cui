@@ -1,0 +1,464 @@
+#include <cudaCompress/util/DWTCommon.cuh>
+#include <cudaCompress/util/DWTFloatFilters.cuh>
+#include <cudaCompress/util/Quantize.cuh>
+
+
+namespace cudaCompress {
+
+namespace util {
+
+
+static __device__ inline float unquantizeFromSymbol(uint symbol, float quantizationStep)
+{
+    //TODO make quantizer type configurable?
+    return unquantizeFromSymbol<QUANTIZE_DEADZONE>(symbol, quantizationStep);
+}
+
+
+template<typename THigh, int blockSizeX, int blockSizeY, int blockCount>
+__global__ void inverseDWT9YFromSymbolsKernel(float* __restrict__ pDst, const float* __restrict__ pLLL, const THigh* __restrict__ const* __restrict__ ppH, float quantStep, int sizeX, int sizeY, int dstRowPitch, int lowpassRowPitch)
+{
+    // shared storage for 1 x blockCount blocks + overlap
+    // lowpass and highpass parts are interleaved; each has blockCount/2 blocks and FILTER_OVERHEAD_INV "halo" pixels
+    // "+ 1" to avoid bank conflicts
+    __shared__ float s_Data[blockSizeX][blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1];
+
+
+    int offsetX = blockIdx.x * blockSizeX + threadIdx.x;
+    const int offsetY = (blockIdx.y * blockCount / 2) * blockSizeY + threadIdx.y;
+
+    if(offsetX >= sizeX)
+        return;
+
+    // offset dst ptr into correct column
+    pDst += offsetX;
+
+    const int highX = (offsetX >= sizeX/2) ? 1 : 0;
+
+    offsetX -= highX * sizeX/2;
+
+    const THigh* __restrict__ pHighpass = ppH[1 + highX];
+    pHighpass += offsetX;
+
+
+    int globalIndex = offsetY - blockSizeY;
+    int sharedIndex = 2 * (threadIdx.y + (FILTER_OFFSET+1)/2 - blockSizeY);
+
+    int rowPitch = (sizeX/2);
+
+    if(highX == 0) {
+        // offset lowpass ptr into correct column
+        pLLL += offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[mirrorLeft(globalIndex) * lowpassRowPitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * rowPitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data
+        #pragma unroll
+        for(int block = 0; block < blockCount/2; block++) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[globalIndex * lowpassRowPitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[globalIndex * rowPitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+
+        // load right halo
+        if(rightHaloTest<blockSizeY, (FILTER_OFFSET_RIGHT+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[mirrorRightRepeat(globalIndex, sizeY/2) * lowpassRowPitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeY/2) * rowPitch], quantStep);
+        }
+    } else {
+        const THigh* __restrict__ pLowpass = ppH[0];
+        // offset lowpass ptr into correct column
+        pLowpass += offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorLeft(globalIndex) * rowPitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * rowPitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data
+        #pragma unroll
+        for(int block = 0; block < blockCount/2; block++) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[globalIndex * rowPitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[globalIndex * rowPitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+
+        // load right halo
+        if(rightHaloTest<blockSizeY, (FILTER_OFFSET_RIGHT+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorRightRepeat(globalIndex, sizeY/2) * rowPitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeY/2) * rowPitch], quantStep);
+        }
+    }
+
+
+    __syncthreads();
+
+
+    int filterBaseIndex = (threadIdx.y % 2) * FILTER_LENGTH;
+
+    // offset output data ptr into the first block to write
+    const int offsetYOutput = (blockIdx.y * blockCount) * blockSizeY + threadIdx.y;
+    pDst += offsetYOutput * dstRowPitch;
+
+    // compute results and store in global memory
+    #pragma unroll
+    for(int block = 0; block < blockCount; block++) {
+        int blockOffset = block * blockSizeY;
+
+        float sum = 0.0f;
+
+        #pragma unroll
+        for(int i = 0; i < FILTER_LENGTH; i++) {
+            int index = blockOffset + int(threadIdx.y) + i + (FILTER_OFFSET%2);
+            float value = s_Data[threadIdx.x][index];
+            sum += g_InverseFilterCoefficients[filterBaseIndex + i] * value;
+        }
+
+        pDst[blockOffset * dstRowPitch] = sum;
+    }
+}
+
+template<typename THigh, int blockSizeX, int blockSizeY>
+__global__ void inverseDWT9YFromSymbolsRestKernel(float* __restrict__ pDst, const float* __restrict__ pLLL, const THigh*const* __restrict__ ppH, float quantStep, int baseY, int sizeX, int sizeY, int blockCount, int dstRowPitch, int lowpassRowPitch)
+{
+    // shared storage for 1 x blockCount blocks + overlap
+    // lowpass and highpass parts are interleaved; each has blockCount/2 blocks and FILTER_OVERHEAD_INV "halo" pixels
+    // "+ 1" to avoid bank conflicts
+    //__shared__ float s_Data[blockSizeX][blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1];
+    extern __shared__ float s_Data[];
+    const int sharedLine = blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1;
+
+
+    int offsetX = blockIdx.x * blockSizeX + threadIdx.x;
+    const int offsetY = baseY / 2 + threadIdx.y;
+
+    if(offsetX >= sizeX)
+        return;
+
+    // offset dst ptr into correct column
+    pDst += offsetX;
+
+    const int highX = (offsetX >= sizeX/2) ? 1 : 0;
+
+    offsetX -= highX * sizeX/2;
+
+    const THigh* __restrict__ pHighpass = ppH[1 + highX];
+    pHighpass += offsetX;
+
+
+    int globalIndex = offsetY - blockSizeY;
+    int sharedIndex = 2 * (threadIdx.y + (FILTER_OFFSET+1)/2 - blockSizeY);
+
+    int rowPitch = (sizeX/2);
+
+    if(highX == 0) {
+        // offset lowpass ptr into correct column
+        pLLL += offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = pLLL[mirrorLeft(globalIndex) * lowpassRowPitch];
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * rowPitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data and right halo
+        for(int block = 0; block < blockCount/2 + 1; block++) {
+            if(globalIndex >= sizeY/2 + (FILTER_OFFSET_RIGHT+1)/2) break;
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = pLLL[mirrorRightRepeat(globalIndex, sizeY/2) * lowpassRowPitch];
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeY/2) * rowPitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+    } else {
+        const THigh* __restrict__ pLowpass = ppH[0];
+        // offset lowpass ptr into correct column
+        pLowpass += offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorLeft(globalIndex) * rowPitch], quantStep);
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * rowPitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data and right halo
+        for(int block = 0; block < blockCount/2 + 1; block++) {
+            if(globalIndex >= sizeY/2 + (FILTER_OFFSET_RIGHT+1)/2) break;
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorRightRepeat(globalIndex, sizeY/2) * rowPitch], quantStep);
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeY/2) * rowPitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+    }
+
+
+    __syncthreads();
+
+
+    int filterBaseIndex = (threadIdx.y % 2) * FILTER_LENGTH;
+
+    // offset output data ptr into the first block to write
+    const int offsetYOutput = baseY + threadIdx.y;
+    pDst += offsetYOutput * dstRowPitch;
+
+    // compute results and store in global memory
+    for(int block = 0; block < blockCount; block++) {
+        int blockOffset = block * blockSizeY;
+        if(offsetYOutput + blockOffset >= sizeY) break;
+
+        float sum = 0.0f;
+
+        #pragma unroll
+        for(int i = 0; i < FILTER_LENGTH; i++) {
+            int index = blockOffset + int(threadIdx.y) + i + (FILTER_OFFSET%2);
+            float value = s_Data[threadIdx.x * sharedLine + index];
+            sum += g_InverseFilterCoefficients[filterBaseIndex + i] * value;
+        }
+
+        pDst[blockOffset * dstRowPitch] = sum;
+    }
+}
+
+
+template<typename THigh, int blockSizeX, int blockSizeY, int blockCount>
+__global__ void inverseDWT9ZFromSymbolsKernel(float* __restrict__ pDst, const float* __restrict__ pLLL, const THigh*const* __restrict__ ppH, float quantStep, int sizeX, int sizeY, int sizeZ, int dstRowPitch, int dstSlicePitch, int lowpassRowPitch, int lowpassSlicePitch)
+{
+    // shared storage for 1 x blockCount blocks + overlap
+    // lowpass and highpass parts are interleaved; each has blockCount/2 blocks and FILTER_OVERHEAD_INV "halo" pixels
+    // "+ 1" to avoid bank conflicts
+    __shared__ float s_Data[blockSizeX][blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1];
+
+
+    int offsetX = blockIdx.x * blockSizeX + threadIdx.x;
+    int offsetY = blockIdx.y;
+    const int offsetZ = (blockIdx.z * blockCount / 2) * blockSizeY + threadIdx.y;
+
+    if(offsetX >= sizeX)
+        return;
+
+    // offset dst ptr into correct row and column
+    pDst += offsetY * dstRowPitch + offsetX;
+
+    const int highX = (offsetX >= sizeX/2) ? 1 : 0;
+    const int highY = (offsetY >= sizeY/2) ? 1 : 0;
+
+    offsetX -= highX * sizeX/2;
+    offsetY -= highY * sizeY/2;
+
+    const THigh* __restrict__ pHighpass = ppH[3 + highX + 2 * highY];
+    pHighpass += offsetY * sizeX/2 + offsetX;
+
+
+    int globalIndex = offsetZ - blockSizeY;
+    int sharedIndex = 2 * (threadIdx.y + (FILTER_OFFSET+1)/2 - blockSizeY);
+
+    int slicePitch = (sizeX/2) * (sizeY/2);
+
+    if(highX == 0 && highY == 0) {
+        // offset lowpass ptr into correct row and column
+        pLLL += offsetY * lowpassRowPitch + offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[mirrorLeft(globalIndex) * lowpassSlicePitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * slicePitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data
+        #pragma unroll
+        for(int block = 0; block < blockCount/2; block++) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[globalIndex * lowpassSlicePitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[globalIndex * slicePitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+
+        // load right halo
+        if(rightHaloTest<blockSizeY, (FILTER_OFFSET_RIGHT+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = pLLL[mirrorRightRepeat(globalIndex, sizeZ/2) * lowpassSlicePitch];
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeZ/2) * slicePitch], quantStep);
+        }
+    } else {
+        const THigh* __restrict__ pLowpass = ppH[highX + 2 * highY - 1];
+        // offset lowpass ptr into correct row and column
+        pLowpass += offsetY * (sizeX/2) + offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorLeft(globalIndex) * slicePitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * slicePitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data
+        #pragma unroll
+        for(int block = 0; block < blockCount/2; block++) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[globalIndex * slicePitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[globalIndex * slicePitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+
+        // load right halo
+        if(rightHaloTest<blockSizeY, (FILTER_OFFSET_RIGHT+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x][sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorRightRepeat(globalIndex, sizeZ/2) * slicePitch], quantStep);
+            s_Data[threadIdx.x][sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeZ/2) * slicePitch], quantStep);
+        }
+    }
+
+
+    __syncthreads();
+
+
+    int filterBaseIndex = (threadIdx.y % 2) * FILTER_LENGTH;
+
+    // offset output data ptr into the first block to write
+    const int offsetZOutput = (blockIdx.z * blockCount) * blockSizeY + threadIdx.y;
+    pDst += offsetZOutput * dstSlicePitch;
+
+    // compute results and store in global memory
+    #pragma unroll
+    for(int block = 0; block < blockCount; block++) {
+        int blockOffset = block * blockSizeY;
+
+        float sum = 0.0f;
+
+        #pragma unroll
+        for(int i = 0; i < FILTER_LENGTH; i++) {
+            int index = blockOffset + int(threadIdx.y) + i + (FILTER_OFFSET%2);
+            float value = s_Data[threadIdx.x][index];
+            sum += g_InverseFilterCoefficients[filterBaseIndex + i] * value;
+        }
+
+        pDst[blockOffset * dstSlicePitch] = sum;
+    }
+}
+
+template<typename THigh, int blockSizeX, int blockSizeY>
+__global__ void inverseDWT9ZFromSymbolsRestKernel(float* __restrict__ pDst, const float* __restrict__ pLLL, const THigh*const* __restrict__ ppH, float quantStep, int baseZ, int sizeX, int sizeY, int sizeZ, int blockCount, int dstRowPitch, int dstSlicePitch, int lowpassRowPitch, int lowpassSlicePitch)
+{
+    // shared storage for 1 x blockCount blocks + overlap
+    // lowpass and highpass parts are interleaved; each has blockCount/2 blocks and FILTER_OVERHEAD_INV "halo" pixels
+    // "+ 1" to avoid bank conflicts
+    //__shared__ float s_Data[blockSizeX][blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1];
+    extern __shared__ float s_Data[];
+    const int sharedLine = blockCount * blockSizeY + FILTER_OVERHEAD_INV + 1;
+
+
+    int offsetX = blockIdx.x * blockSizeX + threadIdx.x;
+    int offsetY = blockIdx.y;
+    const int offsetZ = baseZ / 2 + threadIdx.y;
+
+    if(offsetX >= sizeX)
+        return;
+
+    // offset dst ptr into correct row and column
+    pDst += offsetY * dstRowPitch + offsetX;
+
+    const int highX = (offsetX >= sizeX/2) ? 1 : 0;
+    const int highY = (offsetY >= sizeY/2) ? 1 : 0;
+
+    offsetX -= highX * sizeX/2;
+    offsetY -= highY * sizeY/2;
+
+    const THigh* __restrict__ pHighpass = ppH[3 + highX + 2 * highY];
+    pHighpass += offsetY * sizeX/2 + offsetX;
+
+
+    int globalIndex = offsetZ - blockSizeY;
+    int sharedIndex = 2 * (threadIdx.y + (FILTER_OFFSET+1)/2 - blockSizeY);
+
+    int slicePitch = (sizeX/2) * (sizeY/2);
+
+    if(highX == 0 && highY == 0) {
+        // offset lowpass ptr into correct row and column
+        pLLL += offsetY * lowpassRowPitch + offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = pLLL[mirrorLeft(globalIndex) * lowpassSlicePitch];
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * slicePitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data and right halo
+        for(int block = 0; block < blockCount/2 + 1; block++) {
+            if(globalIndex >= sizeZ/2 + (FILTER_OFFSET_RIGHT+1)/2) break;
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = pLLL[mirrorRightRepeat(globalIndex, sizeZ/2) * lowpassSlicePitch];
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeZ/2) * slicePitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+    } else {
+        const THigh* __restrict__ pLowpass = ppH[highX + 2 * highY - 1];
+        // offset lowpass ptr into correct row and column
+        pLowpass += offsetY * (sizeX/2) + offsetX;
+
+        // load left halo
+        if(leftHaloTest<blockSizeY, (FILTER_OFFSET+1)/2>(threadIdx.y)) {
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorLeft(globalIndex) * slicePitch], quantStep);
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorLeftRepeat(globalIndex) * slicePitch], quantStep);
+        }
+        globalIndex += blockSizeY;
+        sharedIndex += 2 * blockSizeY;
+
+        // load main data and right halo
+        for(int block = 0; block < blockCount/2 + 1; block++) {
+            if(globalIndex >= sizeZ/2 + (FILTER_OFFSET_RIGHT+1)/2) break;
+            s_Data[threadIdx.x * sharedLine + sharedIndex] = unquantizeFromSymbol(pLowpass[mirrorRightRepeat(globalIndex, sizeZ/2) * slicePitch], quantStep);
+            s_Data[threadIdx.x * sharedLine + sharedIndex + 1] = unquantizeFromSymbol(pHighpass[mirrorRight(globalIndex, sizeZ/2) * slicePitch], quantStep);
+            globalIndex += blockSizeY;
+            sharedIndex += 2 * blockSizeY;
+        }
+    }
+
+
+    __syncthreads();
+
+
+    int filterBaseIndex = (threadIdx.y % 2) * FILTER_LENGTH;
+
+    // offset output data ptr into the first block to write
+    const int offsetZOutput = baseZ + threadIdx.y;
+    pDst += offsetZOutput * dstSlicePitch;
+
+    // compute results and store in global memory
+    for(int block = 0; block < blockCount; block++) {
+        int blockOffset = block * blockSizeY;
+        if(offsetZOutput + blockOffset >= sizeZ) break;
+
+        float sum = 0.0f;
+
+        #pragma unroll
+        for(int i = 0; i < FILTER_LENGTH; i++) {
+            int index = blockOffset + int(threadIdx.y) + i + (FILTER_OFFSET%2);
+            float value = s_Data[threadIdx.x * sharedLine + index];
+            sum += g_InverseFilterCoefficients[filterBaseIndex + i] * value;
+        }
+
+        pDst[blockOffset * dstSlicePitch] = sum;
+    }
+}
+
+
+}
+
+}

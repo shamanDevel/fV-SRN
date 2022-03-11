@@ -128,41 +128,54 @@ void renderer::ITransferFunction::registerPybindModule(pybind11::module& m)
 	
 	namespace py = pybind11;
 	py::class_<ITransferFunction, std::shared_ptr<ITransferFunction>>(m, "ITransferFunction")
-		.def("evaluate", [](ITransferFunction* self, torch::Tensor densities, double densityMin, double densityMax)
+		.def("evaluate", [](ITransferFunction* self, torch::Tensor densities, double densityMin, double densityMax, std::optional<torch::Tensor> gradient)
 			{
-				return self->evaluate(densities, densityMin, densityMax, {}, {}, c10::cuda::getCurrentCUDAStream());
+				return self->evaluate(densities, densityMin, densityMax, {}, {}, gradient, c10::cuda::getCurrentCUDAStream());
 			},
 			py::doc("Evaluates the TF on the given density array of shape (B,1) and returns the colors of shape (B,4)"),
-				py::arg("densities"), py::arg("min_density"), py::arg("max_density"))
+				py::arg("densities"), py::arg("min_density"), py::arg("max_density"), py::arg("gradients") = std::optional<torch::Tensor>())
 		.def("evaluate_with_previous", [](ITransferFunction* self, torch::Tensor densities, double densityMin, double densityMax,
-			torch::Tensor previousDensity, double stepsize)
+			torch::Tensor previousDensity, double stepsize, std::optional<torch::Tensor> gradient)
 			{
-				return self->evaluate(densities, densityMin, densityMax, previousDensity, stepsize, c10::cuda::getCurrentCUDAStream());
+				return self->evaluate(densities, densityMin, densityMax, previousDensity, stepsize, gradient, c10::cuda::getCurrentCUDAStream());
 			},
 			py::doc("Evaluates the TF on the given density array of shape (B,1) and returns the colors of shape (B,4) with support for preintegratio."),
-				py::arg("densities"), py::arg("min_density"), py::arg("max_density"), py::arg("previous_density"), py::arg("stepsize"))
+				py::arg("densities"), py::arg("min_density"), py::arg("max_density"), 
+				py::arg("previous_density"), py::arg("stepsize"), py::arg("gradients") = std::optional<torch::Tensor>())
 		.def("get_max_absorption", &ITransferFunction::getMaxAbsorption,
 			py::doc("Returns the maximal possible absorption per ray differential (i.e. unit step size)."
-				"This is used for delta-tracking and importance sampling"));
+				"This is used for delta-tracking and importance sampling"))
+	    .def("requires_gradients", &ITransferFunction::requiresGradients,
+			py::doc("Checks, if the TF requires gradients for evaluation."))
+    ;
 }
 
 void renderer::ITransferFunction::fillConstantMemory(const GlobalSettings& s, CUdeviceptr ptr, CUstream stream)
 {
 	double stepsize = 1;
-	auto rayEval = std::dynamic_pointer_cast<IRayEvaluationStepping>(
-		s.root->getSelectedModuleForTag(IRayEvaluation::Tag()));
-	auto volEval = std::dynamic_pointer_cast<IVolumeInterpolation>(
-		s.root->getSelectedModuleForTag(IVolumeInterpolation::Tag()));
-	if (rayEval && volEval) {
-		stepsize = rayEval->getStepsizeWorld(volEval);
+	auto rayEval = s.root ? std::dynamic_pointer_cast<IRayEvaluationStepping>(
+		s.root->getSelectedModuleForTag(IRayEvaluation::Tag())) : nullptr;
+	if (rayEval) {
+		stepsize = rayEval->getStepsizeWorld();
 	}
 	this->fillConstantMemoryTF(s, ptr, stepsize, stream);
+}
+
+bool renderer::ITransferFunction::requiresGradients() const
+{
+	GlobalSettings s{};
+	s.scalarType = GlobalSettings::kFloat;
+	s.volumeShouldProvideNormals = false;
+	this->prepareRendering(s);
+	return s.volumeShouldProvideNormals;
 }
 
 torch::Tensor renderer::ITransferFunction::evaluate(
 	const torch::Tensor& density, double densityMin, double densityMax,
 	const std::optional<torch::Tensor>& previousDensity,
-	const std::optional<double>& stepsize, CUstream stream)
+	const std::optional<double>& stepsize, 
+	const std::optional<torch::Tensor>& gradient,
+	CUstream stream)
 {
 	CHECK_CUDA(density, true);
 	CHECK_DIM(density, 2);
@@ -187,15 +200,29 @@ torch::Tensor renderer::ITransferFunction::evaluate(
 		throw std::runtime_error("Either specify no previousDensity and no stepsize, or specify both. But not mixed.");
 	}
 
+	bool hasGradient = false;
+	if (gradient.has_value())
+	{
+		hasGradient = true;
+		CHECK_CUDA(gradient.value(), true);
+		CHECK_DIM(gradient.value(), 2);
+		CHECK_SIZE(gradient.value(), 1, 3);
+		CHECK_SIZE(gradient.value(), 0, density.size(0));
+	}
+
 	GlobalSettings s{};
 	s.scalarType = density.scalar_type();
 	s.volumeShouldProvideNormals = false;
 
 	//kernel
 	this->prepareRendering(s);
-	TORCH_CHECK(s.volumeShouldProvideNormals == false, 
-		"TFs that require volume gradients are currently not supported");
-	const std::string kernelName = hasPrevious ? "EvaluateTFWithPrevious" : "EvaluateTFNoPrevious";
+	if (s.volumeShouldProvideNormals && !hasGradient)
+	{
+		throw std::runtime_error("The TF requested gradients, but no gradients were passed to the evaluation function");
+	}
+	std::string kernelName = "EvaluateTF";
+	if (hasPrevious) kernelName += "WithPrevious";
+	if (hasGradient) kernelName += "WithGradient";
 	std::vector<std::string> constantNames;
 	if (const auto c = getConstantDeclarationName(s); !c.empty())
 		constantNames.push_back(c);
@@ -232,28 +259,24 @@ torch::Tensor renderer::ITransferFunction::evaluate(
 		{
 			const auto accDensity = accessor< ::kernel::Tensor2Read<scalar_t>>(density);
 			const auto accColor = accessor< ::kernel::Tensor2RW<scalar_t>>(colors);
+			const auto accPrevDensity = hasPrevious
+				? accessor<::kernel::Tensor2Read<scalar_t>>(previousDensity.value())
+				: kernel::Tensor2Read<scalar_t>{};
+			const auto accGradients = hasGradient
+				? accessor<::kernel::Tensor2Read<scalar_t>>(gradient.value())
+				: kernel::Tensor2Read<scalar_t>{};
 			const scalar_t densityMin_s = static_cast<scalar_t>(densityMin);
 			const scalar_t densityMax_s = static_cast<scalar_t>(densityMax);
-			if (hasPrevious) {
-				const auto accPrevDensity = accessor< ::kernel::Tensor2Read<scalar_t>>(previousDensity.value());
-				const scalar_t stepsize_s = static_cast<scalar_t>(stepsize.value());
-				const void* args[] = { &virtual_size, &accDensity, &accPrevDensity, &accColor,
-				    &densityMin_s, &densityMax_s, &stepsize_s };
-				auto result = cuLaunchKernel(
-					fun.fun(), minGridSize, 1, 1, fun.bestBlockSize(), 1, 1,
-					0, stream, const_cast<void**>(args), NULL);
-				if (result != CUDA_SUCCESS)
-					return printError(result, kernelName);
-			}
-			else
-			{
-				const void* args[] = { &virtual_size, &accDensity, &accColor, &densityMin_s, &densityMax_s };
-				auto result = cuLaunchKernel(
-					fun.fun(), minGridSize, 1, 1, fun.bestBlockSize(), 1, 1,
-					0, stream, const_cast<void**>(args), NULL);
-				if (result != CUDA_SUCCESS)
-					return printError(result, kernelName);
-			}
+			const scalar_t stepsize_s = hasPrevious ? static_cast<scalar_t>(stepsize.value()) : scalar_t(1);
+
+	        const void* args[] = { &virtual_size,
+	            &accDensity, &accPrevDensity, &accGradients, &accColor, 
+	            &densityMin_s, &densityMax_s, &stepsize_s };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, fun.bestBlockSize(), 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
 			return true;
 		});
 	if (!success) throw std::runtime_error("Error during rendering!");

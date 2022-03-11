@@ -1,0 +1,252 @@
+/*
+ * Copyright 1993-2010 NVIDIA Corporation.  All rights reserved.
+ *
+ * Please refer to the NVIDIA end user license agreement (EULA) associated
+ * with this source code for terms and conditions that govern your use of
+ * this software. Any use, reproduction, disclosure, or distribution of
+ * this software and related documentation outside the terms of the EULA
+ * is strictly prohibited.
+ *
+ */
+
+// Note: adapted for Fermi and 128 bins per pass; added multi-pass for more bins by Marc Treib
+
+
+#define SHARED_MEMORY_BANKS 32
+
+
+#define SMALL_HISTOGRAM_MAX_BIN_COUNT 128
+
+//Threadblock size: must be a multiple of (4 * SHARED_MEMORY_BANKS)
+//because of the bit permutation of threadIdx.x
+#define SMALL_HISTOGRAM_THREADBLOCK_SIZE (4 * SHARED_MEMORY_BANKS)
+
+
+namespace cudaCompress {
+
+//Data type used for input data fetches
+typedef uint4 data_t;
+
+////////////////////////////////////////////////////////////////////////////////
+// Main computation pass: compute gridDim.x partial histograms
+////////////////////////////////////////////////////////////////////////////////
+inline __device__ void addElem(uchar* s_ThreadBase, uint data, uint dataBias, uint binCount)
+{
+    uint dataClamped = min(max(data, dataBias), dataBias + binCount - 1);
+    uint inc = (data == dataClamped) ? 1 : 0;
+    s_ThreadBase[(dataClamped - dataBias) * SMALL_HISTOGRAM_THREADBLOCK_SIZE] += inc;
+}
+
+template<typename T>
+inline __device__ void addWord(uchar* s_ThreadBase, uint data, uint dataBias, uint binCount);
+
+template<>
+inline __device__ void addWord<ushort>(uchar* s_ThreadBase, uint data, uint dataBias, uint binCount)
+{
+    addElem(s_ThreadBase,  data        & 0xFFFFU, dataBias, binCount);
+    addElem(s_ThreadBase, (data >> 16) & 0xFFFFU, dataBias, binCount);
+}
+
+template<>
+inline __device__ void addWord<uint>(uchar* s_ThreadBase, uint data, uint dataBias, uint binCount)
+{
+    addElem(s_ThreadBase, data, dataBias, binCount);
+}
+
+template<typename T, uint binCountStorage>
+__global__ void smallHistogramKernel(uint* pPartialHistograms, data_t** ppData, uint* pElemCount, uint dataBias, uint binCount)
+{
+    //Encode thread index in order to avoid bank conflicts in s_Hist[] access:
+    //each group of SHARED_MEMORY_BANKS threads accesses consecutive shared memory banks
+    //and the same bytes [0..3] within the banks
+    //Because of this permutation block size should be a multiple of 4 * SHARED_MEMORY_BANKS
+    //TODO this is hardcoded for SHARED_MEMORY_BANKS == 32...
+    const uint threadPos = 
+        ( (threadIdx.x & ~(SHARED_MEMORY_BANKS * 8 - 1)) << 0 ) |
+        ( (threadIdx.x &  (SHARED_MEMORY_BANKS     - 1)) << 2 ) |
+        ( (threadIdx.x &  (SHARED_MEMORY_BANKS * 3    )) >> 5 );
+
+    //Per-thread histogram storage
+    __shared__ uchar s_Hist[SMALL_HISTOGRAM_THREADBLOCK_SIZE * binCountStorage];
+    uchar* s_ThreadBase = s_Hist + threadPos;
+
+    //Initialize shared memory (writing 32-bit words)
+    #pragma unroll
+    for(uint i = 0; i < (binCountStorage / 4); i++)
+        ((uint*)s_Hist)[threadIdx.x + i * SMALL_HISTOGRAM_THREADBLOCK_SIZE] = 0;
+
+    __syncthreads();
+
+    //Read data from global memory and submit to the shared-memory histogram
+    //Since histogram counters are byte-sized, every single thread can't do more than 255 submission
+    data_t* pData = ppData[blockIdx.y];
+    // assume ppData has been appropriately padded to a multiple of sizeof(data_t) bytes (with values >= dataBias+binCount)
+    uint dataCount = (pElemCount[blockIdx.y] * sizeof(T) + sizeof(data_t) - 1) / sizeof(data_t);
+    for(uint pos = blockIdx.x * blockDim.x + threadIdx.x; pos < dataCount; pos += blockDim.x * gridDim.x) {
+        data_t data = pData[pos];
+        addWord<T>(s_ThreadBase, data.x, dataBias, binCount);
+        addWord<T>(s_ThreadBase, data.y, dataBias, binCount);
+        addWord<T>(s_ThreadBase, data.z, dataBias, binCount);
+        addWord<T>(s_ThreadBase, data.w, dataBias, binCount);
+    }
+
+    __syncthreads();
+
+    //Accumulate per-thread histograms into per-block and write to global memory
+    if(threadIdx.x < binCount) {
+        uchar* s_HistBase = s_Hist + threadIdx.x * SMALL_HISTOGRAM_THREADBLOCK_SIZE;
+
+        uint sum = 0;
+        uint pos = 4 * (threadIdx.x & (SHARED_MEMORY_BANKS - 1));
+
+        #pragma unroll
+        for(uint i = 0; i < (SMALL_HISTOGRAM_THREADBLOCK_SIZE / 4); i++) {
+            sum += 
+                s_HistBase[pos + 0] +
+                s_HistBase[pos + 1] +
+                s_HistBase[pos + 2] +
+                s_HistBase[pos + 3];
+            pos = (pos + 4) & (SMALL_HISTOGRAM_THREADBLOCK_SIZE - 1);
+        }
+
+        pPartialHistograms[(blockIdx.y * gridDim.x + blockIdx.x) * binCount + threadIdx.x] = sum;
+    }
+}
+
+
+//Warps == subhistograms per threadblock
+#define LARGE_HISTOGRAM_WARP_COUNT 6
+#define LARGE_HISTOGRAM_THREADBLOCK_SIZE (LARGE_HISTOGRAM_WARP_COUNT * WARP_SIZE)
+
+#define LARGE_HISTOGRAM_MAX_BIN_COUNT 2048
+
+
+inline __device__ void addElemAtomic(uint* s_WarpHist, uint data, uint dataBias, uint binCount)
+{
+    uint dataClamped = min(max(data, dataBias), dataBias + binCount - 1);
+    if(data == dataClamped) {
+        atomicAdd(s_WarpHist + data - dataBias, 1);
+    }
+}
+
+template<typename T>
+inline __device__ void addWordAtomic(uint* s_WarpHist, uint data, uint dataBias, uint binCount);
+
+template<>
+inline __device__ void addWordAtomic<ushort>(uint* s_WarpHist, uint data, uint dataBias, uint binCount)
+{
+    addElemAtomic(s_WarpHist,  data        & 0xFFFFU, dataBias, binCount);
+    addElemAtomic(s_WarpHist, (data >> 16) & 0xFFFFU, dataBias, binCount);
+}
+
+template<>
+inline __device__ void addWordAtomic<uint>(uint* s_WarpHist, uint data, uint dataBias, uint binCount)
+{
+    addElemAtomic(s_WarpHist, data, dataBias, binCount);
+}
+
+// version for small number of histograms: multiple thread blocks per histogram; write into partial histograms
+template<typename T, uint binCountStorage>
+__global__ void largeHistogramKernel1(uint* pPartialHistograms, uint** ppData, uint* pElemCount, uint dataBias, uint binCount)
+{
+    //Per-warp subhistogram storage
+    __shared__ uint s_Hist[LARGE_HISTOGRAM_WARP_COUNT * binCountStorage];
+    uint* s_WarpHist = s_Hist + (threadIdx.x >> LOG2_WARP_SIZE) * binCount;
+
+    //Clear shared memory storage for current threadblock before processing
+    #pragma unroll
+    for(uint i = 0; i < (LARGE_HISTOGRAM_WARP_COUNT * binCountStorage / LARGE_HISTOGRAM_THREADBLOCK_SIZE); i++)
+        s_Hist[threadIdx.x + i * LARGE_HISTOGRAM_THREADBLOCK_SIZE] = 0;
+
+    //Cycle through the entire data set, update subhistograms for each warp
+    __syncthreads();
+    uint* pData = ppData[blockIdx.y];
+    // assume ppData has been appropriately padded to a multiple of sizeof(uint) bytes (with values >= dataBias+binCount)
+    uint dataCount = (pElemCount[blockIdx.y] * sizeof(T) + sizeof(uint) - 1) / sizeof(uint);
+    for(uint pos = blockIdx.x * blockDim.x + threadIdx.x; pos < dataCount; pos += blockDim.x * gridDim.x) {
+        uint data = pData[pos];
+        addWordAtomic<T>(s_WarpHist, data, dataBias, binCount);
+    }
+
+    //Merge per-warp histograms into per-block and write to global memory
+    __syncthreads();
+    for(uint bin = threadIdx.x; bin < binCount; bin += LARGE_HISTOGRAM_THREADBLOCK_SIZE) {
+        uint sum = 0;
+
+        for(uint i = 0; i < LARGE_HISTOGRAM_WARP_COUNT; i++)
+            sum += s_Hist[bin + i * binCount];
+
+        pPartialHistograms[(blockIdx.y * gridDim.x + blockIdx.x) * binCount + bin] = sum;
+    }
+}
+
+// version for large number of histograms: single thread block per histogram; write directly into final histograms
+template<typename T, uint binCountStorage>
+__global__ void largeHistogramKernel2(uint** ppHistograms, uint** ppData, uint* pElemCount, uint binCountDone, uint binCountThisPass, uint binCountTotal)
+{
+    //Per-warp subhistogram storage
+    __shared__ uint s_Hist[LARGE_HISTOGRAM_WARP_COUNT * binCountStorage];
+    uint* s_WarpHist = s_Hist + (threadIdx.x >> LOG2_WARP_SIZE) * binCountThisPass;
+
+    //Clear shared memory storage for current threadblock before processing
+    #pragma unroll
+    for(uint i = 0; i < (LARGE_HISTOGRAM_WARP_COUNT * binCountStorage / LARGE_HISTOGRAM_THREADBLOCK_SIZE); i++)
+        s_Hist[threadIdx.x + i * LARGE_HISTOGRAM_THREADBLOCK_SIZE] = 0;
+
+    //Cycle through the entire data set, update subhistograms for each warp
+    __syncthreads();
+    uint* pData = ppData[blockIdx.y];
+    // assume ppData has been appropriately padded to a multiple of sizeof(uint) bytes (with values >= dataBias+binCountThisPass)
+    uint dataCount = (pElemCount[blockIdx.y] * sizeof(T) + sizeof(uint) - 1) / sizeof(uint);
+    for(uint pos = blockIdx.x * blockDim.x + threadIdx.x; pos < dataCount; pos += blockDim.x * gridDim.x) {
+        uint data = pData[pos];
+        addWordAtomic<T>(s_WarpHist, data, binCountDone, binCountThisPass);
+    }
+
+    //Merge per-warp histograms into per-block and write to global memory
+    __syncthreads();
+    for(uint bin = threadIdx.x; bin < binCountThisPass; bin += LARGE_HISTOGRAM_THREADBLOCK_SIZE) {
+        uint sum = 0;
+        for(uint i = 0; i < LARGE_HISTOGRAM_WARP_COUNT; i++)
+            sum += s_Hist[bin + i * binCountThisPass];
+
+        uint* pHistogram = ppHistograms[blockIdx.y];
+        pHistogram[binCountDone + bin] = sum;
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Merge histogramKernel() output
+// Run one threadblock per bin; each threadbock adds up the same bin counter 
+// from every partial histogram. Reads are uncoalesced, but mergeHistogram
+// takes only a fraction of total processing time
+////////////////////////////////////////////////////////////////////////////////
+#define MERGE_THREADBLOCK_SIZE 128
+
+__global__ void mergeHistogramKernel(uint** ppHistograms, uint binOffset, uint* pPartialHistograms, uint partialHistogramCount, uint binCount)
+{
+    __shared__ uint s_data[MERGE_THREADBLOCK_SIZE];
+
+    uint histogramIndex = blockIdx.y;
+    uint bin = blockIdx.x;
+    pPartialHistograms += histogramIndex * partialHistogramCount * binCount;
+
+    uint sum = 0;
+    for(uint i = threadIdx.x; i < partialHistogramCount; i += MERGE_THREADBLOCK_SIZE)
+        sum += pPartialHistograms[bin + i * binCount];
+    s_data[threadIdx.x] = sum;
+
+    for(uint stride = MERGE_THREADBLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        __syncthreads();
+        if(threadIdx.x < stride)
+            s_data[threadIdx.x] += s_data[threadIdx.x + stride];
+    }
+
+    if(threadIdx.x == 0) {
+        uint* pHistogram = ppHistograms[histogramIndex];
+        pHistogram[binOffset + bin] = s_data[0];
+    }
+}
+
+}

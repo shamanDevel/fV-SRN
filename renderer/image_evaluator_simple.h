@@ -65,13 +65,14 @@ public:
 	bool isIterativeRefining() const override;
 	torch::Tensor render(int width, int height, CUstream stream, bool refine, const torch::Tensor& out) override;
 	float getExposureForTonemapping() const;
-	void copyOutputToTexture(const torch::Tensor& output, GLubyte* texture, ChannelMode channel, CUstream stream) override;
-	static torch::Tensor extractColor(const torch::Tensor& rawInputTensor, bool useTonemapping, float maxExposure);
+    void extractColor(const torch::Tensor& inputTensor, tensor_or_texture_t output, ChannelMode channel, CUstream stream) override;
+    static torch::Tensor extractColorTorch(const torch::Tensor& rawInputTensor, bool useTonemapping, float maxExposure, ChannelMode channel);
 	void load(const nlohmann::json& json, const ILoadingContext* fetcher) override;
 	void save(nlohmann::json& json, const ISavingContext* context) const override;
 protected:
 	void registerPybindModule(pybind11::module& m) override;
 };
+typedef std::shared_ptr<ImageEvaluatorSimple> ImageEvaluatorSimple_ptr;
 
 
 END_RENDERER_NAMESPACE

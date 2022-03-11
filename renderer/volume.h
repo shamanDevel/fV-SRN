@@ -112,6 +112,7 @@ public:
 		cudaArray_t dataGpu_;
 		cudaTextureObject_t dataTexLinear_;
 		cudaTextureObject_t dataTexNearest_;
+		cudaSurfaceObject_t dataSurface_;
 		int cpuDataCounter_;
 		int gpuDataCounter_;
 
@@ -153,6 +154,7 @@ public:
 		 */
 		[[nodiscard]] cudaTextureObject_t dataTexGpuLinear() const;
         [[nodiscard]] cudaTextureObject_t dataTexGpuNearest() const;
+		[[nodiscard]] cudaSurfaceObject_t gpuSurface() const;
 
         /**
 		 * Copies the CPU data to the GPU.

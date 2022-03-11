@@ -127,6 +127,16 @@ void renderer::KernelLoader::setDebugMode(bool debug)
 	reloadCudaKernels();
 }
 
+void renderer::KernelLoader::unittestOverrideVerboseCompilerLogs(bool log)
+{
+	overrideNoLog = !log;
+}
+
+void renderer::KernelLoader::unittestDisableVerboseCompilerLogOverride()
+{
+	overrideNoLog.reset();
+}
+
 bool renderer::KernelLoader::loadCUDASources(bool no_log)
 {
 	if (!includeFiles.empty()) return false;
@@ -235,8 +245,9 @@ std::optional<renderer::KernelLoader::KernelFunction> renderer::KernelLoader::ge
 		}
 
 		try {
+			bool noLog = overrideNoLog.value_or(false); //!noThrow
 			const auto storage = std::make_shared<KernelStorage>(
-				kernel, includeFiles, source, constantNames, opts, !noThrow, debugMode);
+				kernel, includeFiles, source, constantNames, opts, noLog, debugMode);
 			if (!noCache) {
 				kernelStorage.emplace(kernelKey, storage);
 				saveKernelCache();
@@ -479,7 +490,7 @@ renderer::KernelLoader::KernelStorage::KernelStorage(std::ifstream& i)
 		human2machine[key] = value;
 	}
 
-	loadPTX(false);
+	loadPTX(true);
 }
 
 void renderer::KernelLoader::KernelStorage::loadPTX(bool no_log)
@@ -488,9 +499,36 @@ void renderer::KernelLoader::KernelStorage::loadPTX(bool no_log)
 		std::cout << "Load module \"" << this->machineName << "\"" << std::endl;
 	}
 	//load PTX
-	//CU_SAFE_CALL(cuCtxSynchronize());
-	CU_SAFE_CALL(cuModuleLoadDataEx(&this->module, this->ptxData.data(), 0, 0, 0));
-	//CU_SAFE_CALL(cuCtxSynchronize());
+	unsigned int infoBufferSize = 1024;
+	unsigned int errorBufferSize = 1024;
+	unsigned int logVerbose = 1;
+	std::vector<CUjit_option> options;
+	std::vector<void*> values;
+	std::unique_ptr<char[]> errorLog = std::make_unique<char[]>(errorBufferSize);
+	char* errorLogData = errorLog.get();
+	std::unique_ptr<char[]> infoLog = std::make_unique<char[]>(infoBufferSize);
+	char* infoLogData = infoLog.get();
+	options.push_back(CU_JIT_ERROR_LOG_BUFFER); //Pointer to a buffer in which to print any log messages that reflect errors
+	values.push_back(errorLogData);
+	options.push_back(CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES); //Log buffer size in bytes. Log messages will be capped at this size (including null terminator)
+	values.push_back((void*)errorBufferSize);
+	options.push_back(CU_JIT_INFO_LOG_BUFFER);
+	values.push_back(infoLogData);
+	options.push_back(CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES);
+	values.push_back((void*)infoBufferSize);
+	options.push_back(CU_JIT_TARGET_FROM_CUCONTEXT); //Determines the target based on the current attached context (default)
+	values.push_back(0); //No option value required for CU_JIT_TARGET_FROM_CUCONTEXT
+	options.push_back(CU_JIT_LOG_VERBOSE);
+	values.push_back((void*)logVerbose);
+	auto err = cuModuleLoadDataEx(&this->module, this->ptxData.data(), options.size(), options.data(), values.data());
+    if (infoLogData[0] && !no_log)
+	{
+		std::cout << infoLog.get() << std::endl;
+	}
+    if (errorLog[0]) {
+		std::cerr << "Compiler error: " << errorLog.get() << std::endl;
+	}
+	CU_SAFE_CALL(err); 
 
 	//get cuda function and constants
 	CU_SAFE_CALL(cuModuleGetFunction(&this->function, this->module, this->machineName.data()));

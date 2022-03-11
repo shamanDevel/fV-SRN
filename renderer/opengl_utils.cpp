@@ -17,7 +17,10 @@ void renderer::OffscreenContext::setup()
 {
 	std::cout << "Setup OpenGL  offscreen context" << std::endl;
 	if (offscreenWindow != nullptr)
-		throw std::runtime_error("OpenGL offscreen context already created");
+	{
+		std::cerr << "OpenGL offscreen context already created" << std::endl;
+		return;
+	}
 
 	// Setup window
 	glfwSetErrorCallback(glfw_error_callback);

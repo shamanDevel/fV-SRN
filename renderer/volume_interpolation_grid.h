@@ -53,6 +53,7 @@ public:
 		VelocityZ,
 		VelocityMagnitude,
 		Density,
+		DensityCurvature,
 		__Count__
 	};
 private:
@@ -201,6 +202,7 @@ public:
 protected:
 	void registerPybindModule(pybind11::module& m) override;
 public:
+	[[nodiscard]] bool supportsCurvatureEstimation() const override { return true; }
 	GlobalSettings::VolumeOutput outputType() const override;
 	std::optional<int> getBatches(const GlobalSettings& s) const override;
 	std::string getDefines(const GlobalSettings& s) const override;
@@ -212,6 +214,7 @@ public:
 private:
 	//UI
 	void loadVolumeDialog();
+	void loadVolumeFromPath(const std::string& filename);
 	void loadEnsemble(const std::string& filename, float* progress);
 	void loadVolume(const std::string& filename, float* progress);
 	Volume_ptr loadVolumeImpl(const std::string& filename, float* progress);

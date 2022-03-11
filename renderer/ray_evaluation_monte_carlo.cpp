@@ -9,6 +9,8 @@
 #include "helper_math.cuh"
 #include "module_registry.h"
 #include "volume_interpolation_grid.h"
+#include "pytorch_utils.h"
+#include <cuMat/src/Context.h>
 
 
 renderer::RayEvaluationMonteCarlo::RayEvaluationMonteCarlo()
@@ -351,9 +353,9 @@ void renderer::RayEvaluationMonteCarlo::performRasterization(const RasterizingCo
 		double3 lightPos = getLightPosition(context->root);
 		glm::mat4 modelMatrix = glm::translate(glm::vec3(lightPos.x, lightPos.y, lightPos.z))
 	        * glm::scale(glm::vec3(lightRadius_, lightRadius_, lightRadius_));
-		lightShader_.setMat4("model", modelMatrix);
-		lightShader_.setMat4("view", context->view);
-		lightShader_.setMat4("projection", context->projection);
+		lightShader_.setMat4("modelMatrix", modelMatrix);
+		lightShader_.setMat4("viewMatrix", context->view);
+		lightShader_.setMat4("projectionMatrix", context->projection);
 		lightShader_.setVec3("ambientColor", 0.5f, 0.5, 0.5f);
 		lightShader_.setVec3("diffuseColor", 0.5f, 0.5f, 0.5f);
 		lightShader_.setVec3("lightDirection", 1, 0, 0);
@@ -364,6 +366,235 @@ void renderer::RayEvaluationMonteCarlo::performRasterization(const RasterizingCo
 		throw std::runtime_error("OpenGL-Support disabled, can't visualize the light position");
 #endif
 	}
+}
+
+torch::Tensor renderer::RayEvaluationMonteCarlo::SampleLight(IImageEvaluator_ptr context,
+	int numSamples, unsigned time, CUstream stream)
+{
+	int batches = context->computeBatchCount();
+	if (batches != 1)
+		throw std::runtime_error("batching not supported");
+	auto m = context->getSelectedModuleForTag(IRayEvaluation::Tag());
+	auto ray = std::dynamic_pointer_cast<RayEvaluationMonteCarlo>(m);
+	if (!ray)
+		throw std::runtime_error("Context does not point to MonteCarlo Ray Evaluation");
+
+	IKernelModule::GlobalSettings s = context->getGlobalSettings();
+	context->modulesPrepareRendering(s);
+
+	const std::string kernelName = "RayEvaluationMCSampleLight";
+	std::stringstream extraSource;
+	extraSource << "#include \"renderer_ray_evaluation_monte_carlo_kernels.cuh\"\n";
+	KernelLoader::KernelFunction fun = context->getKernel(
+		s, kernelName, extraSource.str());
+	context->fillConstants(fun, s, stream);
+
+	torch::Tensor output = torch::empty({ numSamples, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	int blockSize = fun.bestBlockSize();
+	dim3 virtual_size{
+		static_cast<unsigned int>(numSamples),
+		static_cast<unsigned int>(1),
+		static_cast<unsigned int>(1) };
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(numSamples, blockSize)), fun.minGridSize());
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "RayEvaluationMonteCarlo::SampleLight", [&]()
+		{
+			const auto acc = accessor< ::kernel::Tensor2RW<scalar_t>>(output);
+			const void* args[] = { &virtual_size, &acc, &time };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return output;
+}
+
+torch::Tensor renderer::RayEvaluationMonteCarlo::EvalBackground(IImageEvaluator_ptr context,
+    const torch::Tensor& rayStart, const torch::Tensor& rayDir, unsigned time, CUstream stream)
+{
+	CHECK_CUDA(rayDir, true);
+	CHECK_CUDA(rayStart, true);
+	CHECK_DIM(rayStart, 2);
+	CHECK_DIM(rayDir, 2);
+	CHECK_SIZE(rayStart, 1, 3);
+	CHECK_SIZE(rayDir, 1, 3);
+	CHECK_SIZE(rayStart, 0, rayDir.size(0));
+	int numSamples = rayStart.size(0);
+
+	int batches = context->computeBatchCount();
+	if (batches != 1)
+		throw std::runtime_error("batching not supported");
+	auto m = context->getSelectedModuleForTag(IRayEvaluation::Tag());
+	auto ray = std::dynamic_pointer_cast<RayEvaluationMonteCarlo>(m);
+	if (!ray)
+		throw std::runtime_error("Context does not point to MonteCarlo Ray Evaluation");
+
+	IKernelModule::GlobalSettings s = context->getGlobalSettings();
+	context->modulesPrepareRendering(s);
+
+	const std::string kernelName = "RayEvaluationMCEvalBackground";
+	std::stringstream extraSource;
+	extraSource << "#include \"renderer_ray_evaluation_monte_carlo_kernels.cuh\"\n";
+	KernelLoader::KernelFunction fun = context->getKernel(
+		s, kernelName, extraSource.str());
+	context->fillConstants(fun, s, stream);
+
+	torch::Tensor output = torch::empty({ numSamples, 4 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	int blockSize = fun.bestBlockSize();
+	dim3 virtual_size{
+		static_cast<unsigned int>(numSamples),
+		static_cast<unsigned int>(1),
+		static_cast<unsigned int>(1) };
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(numSamples, blockSize)), fun.minGridSize());
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "RayEvaluationMonteCarlo::EvalBackground", [&]()
+		{
+			auto accStart = accessor<::kernel::Tensor2Read<scalar_t>>(rayStart);
+			auto accDir = accessor<::kernel::Tensor2Read<scalar_t>>(rayDir);
+			const auto accOut = accessor< ::kernel::Tensor2RW<scalar_t>>(output);
+			const void* args[] = { &virtual_size, &accStart, &accDir, &accOut, &time };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return output;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> renderer::RayEvaluationMonteCarlo::NextDirection(IImageEvaluator_ptr context,
+    const torch::Tensor& rayStart, const torch::Tensor& rayDir, unsigned time, CUstream stream)
+{
+	CHECK_CUDA(rayDir, true);
+	CHECK_CUDA(rayStart, true);
+	CHECK_DIM(rayStart, 2);
+	CHECK_DIM(rayDir, 2);
+	CHECK_SIZE(rayStart, 1, 3);
+	CHECK_SIZE(rayDir, 1, 3);
+	CHECK_SIZE(rayStart, 0, rayDir.size(0));
+	int numSamples = rayStart.size(0);
+
+	int batches = context->computeBatchCount();
+	if (batches != 1)
+		throw std::runtime_error("batching not supported");
+	auto m = context->getSelectedModuleForTag(IRayEvaluation::Tag());
+	auto ray = std::dynamic_pointer_cast<RayEvaluationMonteCarlo>(m);
+	if (!ray)
+		throw std::runtime_error("Context does not point to MonteCarlo Ray Evaluation");
+
+	IKernelModule::GlobalSettings s = context->getGlobalSettings();
+	context->modulesPrepareRendering(s);
+
+	const std::string kernelName = "RayEvaluationMCNextDir";
+	std::stringstream extraSource;
+	extraSource << "#include \"renderer_ray_evaluation_monte_carlo_kernels.cuh\"\n";
+	KernelLoader::KernelFunction fun = context->getKernel(
+		s, kernelName, extraSource.str());
+	context->fillConstants(fun, s, stream);
+
+	torch::Tensor outDir = torch::empty({ numSamples, 3 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+	torch::Tensor outBeta = torch::empty({ numSamples, 1 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	int blockSize = fun.bestBlockSize();
+	dim3 virtual_size{
+		static_cast<unsigned int>(numSamples),
+		static_cast<unsigned int>(1),
+		static_cast<unsigned int>(1) };
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(numSamples, blockSize)), fun.minGridSize());
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "RayEvaluationMonteCarlo::NextDirection", [&]()
+		{
+			auto accStart = accessor<::kernel::Tensor2Read<scalar_t>>(rayStart);
+			auto accDir = accessor<::kernel::Tensor2Read<scalar_t>>(rayDir);
+			const auto accOutDir = accessor< ::kernel::Tensor2RW<scalar_t>>(outDir);
+			const auto accOutBeta = accessor< ::kernel::Tensor2RW<scalar_t>>(outBeta);
+			const void* args[] = { &virtual_size, &accStart, &accDir, &accOutDir, &accOutBeta, &time };
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return std::make_tuple(outDir, outBeta);
+}
+
+torch::Tensor renderer::RayEvaluationMonteCarlo::PhaseFunctionProbability(IImageEvaluator_ptr context,
+	const torch::Tensor& dirIn, const torch::Tensor& dirOut, const torch::Tensor& position, CUstream stream)
+{
+	CHECK_CUDA(dirIn, true);
+	CHECK_CUDA(dirOut, true);
+	CHECK_CUDA(position, true);
+	CHECK_DIM(dirIn, 2);
+	CHECK_DIM(dirOut, 2);
+	CHECK_DIM(position, 2);
+	CHECK_SIZE(dirIn, 1, 3);
+	CHECK_SIZE(dirOut, 1, 3);
+	CHECK_SIZE(position, 1, 3);
+	int numSamples = dirIn.size(0);
+	CHECK_SIZE(dirOut, 0, numSamples);
+	CHECK_SIZE(position, 0, numSamples);
+
+	int batches = context->computeBatchCount();
+	if (batches != 1)
+		throw std::runtime_error("batching not supported");
+	auto m = context->getSelectedModuleForTag(IRayEvaluation::Tag());
+	auto ray = std::dynamic_pointer_cast<RayEvaluationMonteCarlo>(m);
+	if (!ray)
+		throw std::runtime_error("Context does not point to MonteCarlo Ray Evaluation");
+
+	IKernelModule::GlobalSettings s = context->getGlobalSettings();
+	context->modulesPrepareRendering(s);
+
+	const std::string kernelName = "RayEvaluationMCPhaseFunctionProbability";
+	std::stringstream extraSource;
+	extraSource << "#include \"renderer_ray_evaluation_monte_carlo_kernels.cuh\"\n";
+	KernelLoader::KernelFunction fun = context->getKernel(
+		s, kernelName, extraSource.str());
+	context->fillConstants(fun, s, stream);
+
+	torch::Tensor output = torch::empty({ numSamples, 1 },
+		at::TensorOptions().dtype(s.scalarType).device(c10::kCUDA));
+
+	int blockSize = fun.bestBlockSize();
+	dim3 virtual_size{
+		static_cast<unsigned int>(numSamples),
+		static_cast<unsigned int>(1),
+		static_cast<unsigned int>(1) };
+	int minGridSize = std::min(
+		int(CUMAT_DIV_UP(numSamples, blockSize)), fun.minGridSize());
+	bool success = RENDERER_DISPATCH_FLOATING_TYPES(s.scalarType, "RayEvaluationMonteCarlo::PhaseFunctionProbability", [&]()
+		{
+			auto accDirIn = accessor<::kernel::Tensor2Read<scalar_t>>(dirIn);
+			auto accDirOut = accessor<::kernel::Tensor2Read<scalar_t>>(dirOut);
+			auto accPos = accessor<::kernel::Tensor2Read<scalar_t>>(position);
+			const auto accOut = accessor< ::kernel::Tensor2RW<scalar_t>>(output);
+			const void* args[] = { &virtual_size, &accDirIn, &accDirOut, &accPos, &accOut};
+			auto result = cuLaunchKernel(
+				fun.fun(), minGridSize, 1, 1, blockSize, 1, 1,
+				0, stream, const_cast<void**>(args), NULL);
+			if (result != CUDA_SUCCESS)
+				return printError(result, kernelName);
+			return true;
+		});
+	if (!success) throw std::runtime_error("Error during rendering!");
+
+	return output;
 }
 
 void renderer::RayEvaluationMonteCarlo::registerPybindModule(pybind11::module& m)
@@ -382,10 +613,55 @@ void renderer::RayEvaluationMonteCarlo::registerPybindModule(pybind11::module& m
 		.def_readwrite("max_density", &RayEvaluationMonteCarlo::maxDensity_)
 		//.def_readwrite("scattering_factor", &RayEvaluationMonteCarlo::scatteringFactor_)
 		.def_readwrite("num_bounces", &RayEvaluationMonteCarlo::numBounces_)
+		.def_readwrite("color_scaling", &RayEvaluationMonteCarlo::colorScaling_)
 		.def_readwrite("light_pitch_yaw_distance", &RayEvaluationMonteCarlo::lightPitchYawDistance_)
 		.def_readwrite("light_radius", &RayEvaluationMonteCarlo::lightRadius_)
 		.def_readwrite("light_intensity", &RayEvaluationMonteCarlo::lightIntensity_)
 		.def_readwrite("tf", &RayEvaluationMonteCarlo::tf_)
 		//.def_readwrite("brdf", &RayEvaluationMonteCarlo::brdf_);
-		.def_readwrite("phase_function", &RayEvaluationMonteCarlo::phaseFunction_);
+		.def_readwrite("phase_function", &RayEvaluationMonteCarlo::phaseFunction_)
+	    .def_static("SampleLight", [](IImageEvaluator_ptr context, int numSamples, unsigned int time)
+	    {
+				return RayEvaluationMonteCarlo::SampleLight(context, numSamples, time, IImageEvaluator::getDefaultStream());
+	    }, py::doc(R"(
+Samples the light position for MC evaluation.
+context: the image evaluator for the context (camera, volume, phase functions, ...)
+num_samples: the number of samples to generate
+time: the time for the random number generator
+Return: the light position of shape (N,3)
+        )"), py::arg("context"), py::arg("num_samples"), py::arg("time"))
+		.def_static("EvalBackground", [](IImageEvaluator_ptr context, torch::Tensor rayStart, torch::Tensor rayDir, unsigned int time)
+			{
+				return RayEvaluationMonteCarlo::EvalBackground(context, rayStart, rayDir, time, IImageEvaluator::getDefaultStream());
+			}, py::doc(R"(
+Evaluates the background illumination.
+context: the image evaluator for the context (camera, volume, phase functions, ...)
+ray_start: the start position of the ray of shape (N,3)
+ray_dir: the ray direction of shape (N,3)
+time: the time for the random number generator
+Return: the rgb-alpha color of shape (N,4)
+        )"), py::arg("context"), py::arg("ray_start"), py::arg("ray_dir"), py::arg("time"))
+		.def_static("NextDirection", [](IImageEvaluator_ptr context, torch::Tensor rayStart, torch::Tensor rayDir, unsigned int time)
+			{
+				return RayEvaluationMonteCarlo::NextDirection(context, rayStart, rayDir, time, IImageEvaluator::getDefaultStream());
+			}, py::doc(R"(
+Evaluates the next direction after a scattering event.
+context: the image evaluator for the context (camera, volume, phase functions, ...)
+ray_start: the start position of the ray of shape (N,3)
+ray_dir: the ray direction of shape (N,3)
+time: the time for the random number generator
+Return: a tuple [ next direction of shape (N,3),  beta scaling of shape (N,1) ]
+        )"), py::arg("context"), py::arg("ray_start"), py::arg("ray_dir"), py::arg("time"))
+        .def_static("PhaseFunctionProbability", [](IImageEvaluator_ptr context, torch::Tensor dirIn, torch::Tensor dirOut, torch::Tensor pos)
+			{
+				return RayEvaluationMonteCarlo::PhaseFunctionProbability(context, dirIn, dirOut, pos, IImageEvaluator::getDefaultStream());
+			}, py::doc(R"(
+Evaluates the phase function probability
+context: the image evaluator for the context (camera, volume, phase functions, ...)
+dir_in: input direction of shape (N,3)
+dir_out: output direction of shape (N,3)
+pos: current position of shape (N,3)
+Return: probability of the scattering event of shape (N,1)
+        )"), py::arg("context"), py::arg("dir_in"), py::arg("dir_out"), py::arg("pos"))
+    ;
 }

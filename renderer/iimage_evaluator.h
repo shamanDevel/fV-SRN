@@ -70,24 +70,26 @@ public:
 		int width, int height, CUstream stream,
 		bool refine, const torch::Tensor& out = {}) = 0;
 
+	using tensor_or_texture_t = std::variant<torch::Tensor, GLubyte*>;
 	/**
-	 * Copies the output from \ref render() to the specified
-	 * texture of type RGBA8 for display.
+	 * Extracts the channel from the output from \ref render().
+	 * What channel is extracted, is determined by \c channel.
+	 * For channel 'Color', tonemapping is additionally used.
 	 *
-	 * If \c useTonemapping==true and \c channel==ChannelColor,
-	 * a filmic tonmapping is used where \c maxExposure indicates
-	 * the maximal emission in the tensor.
+	 * The output can either be a RGBA8-texture or a torch tensor of shape (B, 4, H, W).
 	 */
-	static void copyOutputToTexture(
-		const torch::Tensor& output, GLubyte* texture,
-		ChannelMode channel, CUstream stream,
-		bool useTonemapping, float maxExposure);
+	static void ExtractColor(
+		const torch::Tensor& inputTensor,
+		tensor_or_texture_t output,
+		bool useTonemapping, float maxExposure,
+		ChannelMode channel, CUstream stream);
 
-	virtual void copyOutputToTexture(
-		const torch::Tensor& output, GLubyte* texture,
+	virtual void extractColor(
+		const torch::Tensor& inputTensor,
+		tensor_or_texture_t output,
 		ChannelMode channel, CUstream stream)
 	{
-		return copyOutputToTexture(output, texture, channel, stream, false, 1.0f);
+		ExtractColor(inputTensor, output, false, 1.0f, channel, stream);
 	}
 
 	[[nodiscard]] virtual ChannelMode selectedChannel() const
@@ -126,7 +128,6 @@ public:
 	 */
 	static CUstream getDefaultStream();
 
-protected:
 	/**
 	 * Creates the global settings for the kernel assembly.
 	 * In detail, sets the scalar type and the root module to this.
@@ -160,6 +161,7 @@ protected:
 		KernelLoader::KernelFunction& f, const IKernelModule::GlobalSettings& s,
 		CUstream stream);
 
+protected:
 	/**
 	 * Draws UI for the global settings (i.e. the scalar type).
 	 * This should be on top of the UI.
@@ -191,14 +193,28 @@ namespace kernel
 	void CopyOutputToTexture(
 		int width, int height,
 		const Tensor4Read<float>& input,
-		GLubyte* texture,
+		GLubyte* output,
 		int r, int g, int b, int a,
 		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
 		CUstream stream);
 	void CopyOutputToTexture(
 		int width, int height,
 		const Tensor4Read<double>& input,
-		GLubyte* texture,
+		GLubyte* output,
+		int r, int g, int b, int a,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
+		CUstream stream);
+	void CopyOutputToTexture(
+		int width, int height, int batches,
+		const Tensor4Read<float>& input,
+		Tensor4RW<float>& output,
+		int r, int g, int b, int a,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
+		CUstream stream);
+	void CopyOutputToTexture(
+		int width, int height, int batches,
+		const Tensor4Read<double>& input,
+		Tensor4RW<double>& output,
 		int r, int g, int b, int a,
 		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
 		CUstream stream);
@@ -218,13 +234,13 @@ namespace kernel
 	void Tonemapping(
 		int width, int height, int batches,
 		const Tensor4Read<float>& input,
-		const Tensor4RW<float>& output,
+		Tensor4RW<float>& output,
 		float maxExposure,
 		CUstream stream);
 	void Tonemapping(
 		int width, int height, int batches,
 		const Tensor4Read<double>& input,
-		const Tensor4RW<double>& output,
+		Tensor4RW<double>& output,
 		float maxExposure,
 		CUstream stream);
 }

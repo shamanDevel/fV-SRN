@@ -8,11 +8,7 @@ set(LIBRARY_HEADER_FILES
     errors.h
 	volume.h
     halton_sampler.h
-
-    # old
 	halton_sampler.h
-
-    #new
     json_utils.h
     lru_cache.h
     parameter.h
@@ -20,6 +16,7 @@ set(LIBRARY_HEADER_FILES
     pytorch_utils.h
     module_registry.h
     transfer_function.h
+    transfer_function_tex2D.h
     volume_interpolation.h
     volume_interpolation_grid.h
     background_worker.h
@@ -39,6 +36,7 @@ set(LIBRARY_HEADER_FILES
     particle_integration.h
     pytorch_functions.h
     volume_interpolation_network.h
+    volume_interpolation_implicit.h
 
     opengl_framebuffer.h
 	opengl_mesh.h
@@ -50,6 +48,7 @@ set(LIBRARY_HEADER_FILES
 
     ../third-party/tinyformat/tinyformat.h
 	../third-party/nlohmann/json.hpp
+	../third-party/lodepng/lodepng.h
 	)
 set(LIBRARY_CUDA_HEADER_FILES
     # Helper, also used outside of kernels
@@ -68,23 +67,31 @@ set(LIBRARY_CUDA_HEADER_FILES
     renderer_tf_piecewise.cuh
     renderer_tf_gaussian.cuh
     renderer_tf_kernels.cuh
+    renderer_tf_tex2D.cuh
     renderer_volume_grid.cuh
     renderer_volume_kernels1.cuh
     renderer_volume_kernels2.cuh
     renderer_volume_kernels3.cuh
+    renderer_volume_kernels4.cuh
+    renderer_volume_kernels5.cuh
     renderer_blending.cuh
     renderer_camera.cuh
     renderer_camera_kernels.cuh
     renderer_ray_evaluation_stepping_iso.cuh
+    renderer_ray_evaluation_stepping_iso_kernels.cuh
     renderer_ray_evaluation_stepping_dvr.cuh
     renderer_ray_evaluation_monte_carlo.cuh
+    renderer_ray_evaluation_monte_carlo_kernels.cuh
     renderer_image_evaluator_simple.cuh
     renderer_brdf_lambert.cuh
+    renderer_brdf_kernels.cuh
     renderer_sampler_curand.cuh
     renderer_phase_function.cuh
     renderer_spherical_harmonics.cuh
     renderer_particle_integration_kernels.cuh
+    renderer_activations.cuh
     renderer_volume_tensorcores.cuh
+    renderer_volume_implicit.cuh
     )
 set(LIBRARY_CUDA_FILES
     iimage_evaluator_cuda.cu
@@ -97,15 +104,13 @@ set(LIBRARY_CUDA_FILES
 	)
 set(LIBRARY_SOURCE_FILES
     volume.cpp
-	volume_implicit.cpp
-
-    #new
     module_registry.cpp
     transfer_function.cpp
     transfer_function_identity.cpp
     transfer_function_texture.cpp
     transfer_function_piecewise.cpp
     transfer_function_gaussian.cpp
+    transfer_function_tex2D.cpp
     volume_interpolation.cpp
     volume_interpolation_grid.cpp
     blending.cpp
@@ -124,12 +129,15 @@ set(LIBRARY_SOURCE_FILES
     particle_integration.cpp
     pytorch_functions.cpp
     volume_interpolation_network.cpp
+    volume_implicit.cpp
+    volume_interpolation_implicit.cpp
 
     opengl_utils.cpp
     opengl_mesh.cpp
 	opengl_oit.cpp
 	opengl_shader.cpp
     opengl_framebuffer.cpp
+    ../third-party/lodepng/lodepng.cpp
 	)
 set(LIBRARY_RESOURCES
 	shaders/PassThrough.vs
@@ -141,6 +149,8 @@ set(LIBRARY_RESOURCES
     shaders/Particles.vs
     shaders/Particles.gs
     shaders/Particles.fs
+    shaders/VolumeImplicit.json
+    shaders/curvature-texture.png
 	)
 # the target name of the library
 set(LIBRARY_NAME Renderer CACHE INTERNAL "the target name of the library, also used for the binding")
@@ -206,6 +216,7 @@ if(NOT ${RENDERER_ONLY_RESOURCES})
             ${CMAKE_SOURCE_DIR}/third-party/portable-file-dialogs
             ${CMAKE_SOURCE_DIR}/third-party/magic_enum/include
             ${CMAKE_SOURCE_DIR}/third-party/thread-pool/include
+            ${CMAKE_SOURCE_DIR}/third-party/lodepng
             ${GLM_INCLUDE_DIRS}
             ${GLEW_INCLUDE_DIR} 
             ${GLFW_INCLUDE_DIRS}
@@ -260,11 +271,9 @@ if(NOT ${RENDERER_ONLY_RESOURCES})
     else()
         # there are some errors that RENDERER_SHADER_DIRS is not properly passed to the compiler
         # therefore, it is required on Unix to provide a custom source lodaer
-        # (Or you hard-code it in renderer/kernel_loader.cpp, line 151ff
         target_compile_definitions(${LIBRARY_NAME} PUBLIC 
             RENDERER_RUNTIME_COMPILATION=1
-            NVCC_ARGS="${RENDERER_NVCC_FLAGS}"
-            NVCC_INCLUDE_DIR=${CUDA_INCLUDE_DIRS})
+            NVCC_ARGS="${RENDERER_NVCC_FLAGS}")
     endif()
     
     # Shared or static

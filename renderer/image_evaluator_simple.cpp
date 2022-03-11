@@ -75,14 +75,8 @@ bool renderer::ImageEvaluatorSimple::drawUI(UIStorage_t& storage)
 	selectedCamera_ = camera;
 	storage[UI_KEY_SELECTED_CAMERA] = camera;
 
-	//volume selection is shared
+	//volume selection
 	IVolumeInterpolation_ptr selection = selectedVolume_;
-	if (const auto& it = storage.find(UI_KEY_SELECTED_VOLUME);
-		it != storage.end())
-	{
-		selection = std::any_cast<IVolumeInterpolation_ptr>(it->second);
-	}
-
 	ImGui::PushID("IRayEvaluation");
 	const auto& volumes =
 		ModuleRegistry::Instance().getModulesForTag(IVolumeInterpolation::Tag());
@@ -254,7 +248,7 @@ torch::Tensor renderer::ImageEvaluatorSimple::render(
 	//settings - part 2
 	if (selectedChannel_ == ChannelMode::ChannelNormal) {
 		s.volumeShouldProvideNormals = true;
-		std::cout << "ChannelNormal selected, request that the volume provides normals" << std::endl;
+		//std::cout << "ChannelNormal selected, request that the volume provides normals" << std::endl;
 	}
 	modulesPrepareRendering(s);
 	if (s.synchronizedThreads)
@@ -374,37 +368,23 @@ float renderer::ImageEvaluatorSimple::getExposureForTonemapping() const
 		return fmaxf(0.001f, lastMaxExposure_ * tonemappingShoulder_);
 }
 
-void renderer::ImageEvaluatorSimple::copyOutputToTexture(const torch::Tensor& output, GLubyte* texture,
-                                                         ChannelMode channel, CUstream stream)
+void renderer::ImageEvaluatorSimple::extractColor(const torch::Tensor& input_tensor, tensor_or_texture_t output,
+    ChannelMode channel, CUstream stream)
 {
-	IImageEvaluator::copyOutputToTexture(output, texture, channel, stream, useTonemapping_,
-		getExposureForTonemapping());
+    IImageEvaluator::ExtractColor(input_tensor, output, 
+		useTonemapping_, getExposureForTonemapping(), channel, stream);
 }
 
-torch::Tensor renderer::ImageEvaluatorSimple::extractColor(const torch::Tensor& rawInputTensor, 
-	bool useTonemapping, float maxExposure)
-{
-	if (!useTonemapping)
-		return rawInputTensor.slice(1, 0, 4);
 
-	CHECK_DIM(rawInputTensor, 4);
-	CHECK_CUDA(rawInputTensor, true);
-	CHECK_SIZE(rawInputTensor, 1, 8);
+torch::Tensor renderer::ImageEvaluatorSimple::extractColorTorch(const torch::Tensor& rawInputTensor,
+	bool useTonemapping, float maxExposure, ChannelMode channel)
+{
 	auto B = rawInputTensor.size(0);
 	auto H = rawInputTensor.size(2);
 	auto W = rawInputTensor.size(3);
 	torch::Tensor output = torch::empty({ B, 4, H, W }, rawInputTensor.options());
 	CUstream stream = getDefaultStream();
-
-	RENDERER_DISPATCH_FLOATING_TYPES(output.scalar_type(), "ImageEvaluatorSimple::extractColor", [&]()
-		{
-			const auto accIn = accessor<::kernel::Tensor4Read<scalar_t>>(rawInputTensor);
-			const auto accOut = accessor<::kernel::Tensor4RW<scalar_t>>(output);
-			::kernel::Tonemapping(
-				W, H, B, accIn, accOut,
-				maxExposure,
-				stream);
-		});
+	ExtractColor(rawInputTensor, output, useTonemapping, maxExposure, channel, stream);
 	return output;
 }
 
@@ -454,7 +434,7 @@ void renderer::ImageEvaluatorSimple::registerPybindModule(pybind11::module& m)
 	registered = true;
 	
 	namespace py = pybind11;
-	py::class_<ImageEvaluatorSimple, IImageEvaluator, std::shared_ptr<ImageEvaluatorSimple>>(m, "ImageEvaluatorSimple")
+	py::class_<ImageEvaluatorSimple, IImageEvaluator, ImageEvaluatorSimple_ptr>(m, "ImageEvaluatorSimple")
 		.def_readwrite("camera", &ImageEvaluatorSimple::selectedCamera_,
 			py::doc("The selected ICamera method"))
 		.def_readwrite("ray_evaluator", &ImageEvaluatorSimple::selectedRayEvaluator_,
@@ -469,22 +449,25 @@ void renderer::ImageEvaluatorSimple::registerPybindModule(pybind11::module& m)
 		.def_readonly("last_max_exposure", &ImageEvaluatorSimple::lastMaxExposure_)
 		.def_readwrite("fix_max_exposure", &ImageEvaluatorSimple::fixMaxExposure_)
 		.def_readwrite("fixed_max_exposure", &ImageEvaluatorSimple::fixedMaxExposure_)
-		.def_static("Extract_color", &ImageEvaluatorSimple::extractColor,
+		.def_static("Extract_color", &ImageEvaluatorSimple::extractColorTorch,
 			py::doc(R"(
 				Extracts the color and performs tonemapping.
 				:param raw_input: the raw input tensor from :render
 				:param use_tonemapping: true to enable tonemapping
 				:param max_exposure: the maximal exposure to consider in tonemapping
+                :param channel: the channel to use
 				:return: a RGB-alpha tensor of shape (B, 4, H, W)
 				)"),
-			py::arg("raw_input"), py::arg("use_tonemapping"), py::arg("max_exposure"))
+			py::arg("raw_input"), py::arg("use_tonemapping"), py::arg("max_exposure"),
+			py::arg("channel") = ChannelMode::ChannelColor)
 		.def("extract_color", [](const ImageEvaluatorSimple& self, const torch::Tensor& rawInput)
 			{
-				return ImageEvaluatorSimple::extractColor(rawInput, self.useTonemapping_,
-					self.getExposureForTonemapping());
+				return ImageEvaluatorSimple::extractColorTorch(rawInput, self.useTonemapping_,
+					self.getExposureForTonemapping(), self.selectedChannel());
 			}, py::doc(R"(
 				Extracts the color and performs tonemapping.
-				This variant uses the default setting from tonemapping_should and last_max_exposure.
+				This variant uses the default setting from tonemapping and last_max_exposure,
+                as well as the selected channel.
 				:param raw_input: the raw input tensor from :render
 				:return: a RGB-alpha tensor of shape (B, 4, H, W)
 				)"), py::arg("raw_input"));

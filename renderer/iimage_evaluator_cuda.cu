@@ -57,24 +57,87 @@ namespace kernel
 
 	void CopyOutputToTexture(
 		int width, int height,
-		const Tensor4Read<float>& output,
-		GLubyte* texture,
+		const Tensor4Read<float>& input,
+		GLubyte* output,
 		int r, int g, int b, int a,
 		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
 		CUstream stream)
 	{
-		CopyOutputToTextureImpl<float>(width, height, output, texture,
+		CopyOutputToTextureImpl<float>(width, height, input, output,
 			r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA, stream);
 	}
 	void CopyOutputToTexture(
 		int width, int height,
-		const Tensor4Read<double>& output,
-		GLubyte* texture,
+		const Tensor4Read<double>& input,
+		GLubyte* output,
 		int r, int g, int b, int a,
 		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
 		CUstream stream)
 	{
-		CopyOutputToTextureImpl<double>(width, height, output, texture,
+		CopyOutputToTextureImpl<double>(width, height, input, output,
+			r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA, stream);
+	}
+
+	template<typename T>
+	__global__ void SelectOutputChannelKernel2(
+		dim3 virtual_size,
+		Tensor4Read<T> input,
+		Tensor4RW<T> output,
+		int rId, int gId, int bId, int aId,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA)
+	{
+		CUMAT_KERNEL_3D_LOOP(x, y, batch, virtual_size)
+		{
+			float r = fetchChannel(input, rId, x, y) * scaleRGB + offsetRGB;
+			float g = fetchChannel(input, gId, x, y) * scaleRGB + offsetRGB;
+			float b = fetchChannel(input, bId, x, y) * scaleRGB + offsetRGB;
+			float a = fetchChannel(input, aId, x, y) * scaleA + offsetA;
+			//printf("%d, %d, %d\n", int(y), input.size(3), int(x));
+			output[batch][0][y][x] = r;
+			output[batch][1][y][x] = g;
+			output[batch][2][y][x] = b;
+			output[batch][3][y][x] = a;
+		}
+		CUMAT_KERNEL_2D_LOOP_END
+	}
+	template<typename T>
+	void CopyOutputToTextureImpl2(
+		int width, int height, int batches,
+		const Tensor4Read<T>& input,
+		Tensor4RW<T>& output,
+		int r, int g, int b, int a,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
+		CUstream stream)
+	{
+		cuMat::Context& ctx = cuMat::Context::current();
+		cuMat::KernelLaunchConfig cfg = ctx.createLaunchConfig3D(width, height, batches, SelectOutputChannelKernel<T>);
+		SelectOutputChannelKernel2<T>
+			<<< cfg.block_count, cfg.thread_per_block, 0, stream >>>
+			(cfg.virtual_size, input, output,
+				r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA);
+		CUMAT_CHECK_ERROR();
+	}
+
+	void CopyOutputToTexture(
+		int width, int height, int batches,
+		const Tensor4Read<float>& input,
+		Tensor4RW<float>& output,
+		int r, int g, int b, int a,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
+		CUstream stream)
+	{
+		CopyOutputToTextureImpl2<float>(width, height, batches, input, output,
+			r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA, stream);
+	}
+	void CopyOutputToTexture(
+		int width, int height, int batches,
+		const Tensor4Read<double>& input,
+		Tensor4RW<double>& output,
+		int r, int g, int b, int a,
+		float scaleRGB, float offsetRGB, float scaleA, float offsetA,
+		CUstream stream)
+	{
+		CopyOutputToTextureImpl2<double>(width, height, batches, input, output,
 			r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA, stream);
 	}
 
@@ -193,7 +256,7 @@ namespace kernel
 	void TonemappingImpl2(
 		int width, int height, int batches,
 		const Tensor4Read<T>& input,
-		const Tensor4RW<T>& output,
+		Tensor4RW<T>& output,
 		float maxExposure,
 		CUstream stream)
 	{
@@ -208,7 +271,7 @@ namespace kernel
 	void Tonemapping(
 		int width, int height, int batches,
 		const Tensor4Read<float>& input,
-		const Tensor4RW<float>& output,
+		Tensor4RW<float>& output,
 		float maxExposure,
 		CUstream stream)
 	{
@@ -217,7 +280,7 @@ namespace kernel
 	void Tonemapping(
 		int width, int height, int batches,
 		const Tensor4Read<double>& input,
-		const Tensor4RW<double>& output,
+		Tensor4RW<double>& output,
 		float maxExposure,
 		CUstream stream)
 	{

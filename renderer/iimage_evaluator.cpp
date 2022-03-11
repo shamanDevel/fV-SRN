@@ -23,16 +23,31 @@ renderer::IImageEvaluator::IImageEvaluator()
 {
 }
 
-void renderer::IImageEvaluator::copyOutputToTexture(
-	const torch::Tensor& output, GLubyte* texture, ChannelMode channel, CUstream stream,
-	bool useTonemapping, float maxExposure)
+void renderer::IImageEvaluator::ExtractColor(const torch::Tensor& inputTensor, tensor_or_texture_t output,
+    bool useTonemapping, float maxExposure, ChannelMode channel, CUstream stream)
 {
-	CHECK_CUDA(output, true);
-	CHECK_DIM(output, 4);
-	CHECK_SIZE(output, 1, 8);
-	CHECK_SIZE(output, 0, 1); //only one batch
-	int height = output.size(2);
-	int width = output.size(3);
+	CHECK_CUDA(inputTensor, true);
+	CHECK_DIM(inputTensor, 4);
+	CHECK_SIZE(inputTensor, 1, 8);
+	CHECK_SIZE(inputTensor, 0, 1); //only one batch
+	int B = inputTensor.size(0);
+	int height = inputTensor.size(2);
+	int width = inputTensor.size(3);
+
+	if (std::holds_alternative<torch::Tensor>(output))
+	{
+		auto& t = std::get<torch::Tensor>(output);
+		CHECK_CUDA(t, true);
+		CHECK_DIM(t, 4);
+		CHECK_SIZE(t, 0, B);
+		CHECK_SIZE(t, 1, 4);
+		CHECK_SIZE(t, 2, height);
+		CHECK_SIZE(t, 3, width);
+	}
+	else
+	{
+		TORCH_CHECK(B == 1, "If the output is an OpenGL texture, batches are not supported");
+	}
 
 	int r, g, b, a;
 	float scaleRGB, offsetRGB, scaleA, offsetA;
@@ -42,16 +57,34 @@ void renderer::IImageEvaluator::copyOutputToTexture(
 	{
 		if (useTonemapping)
 		{
-			RENDERER_DISPATCH_FLOATING_TYPES(output.scalar_type(), "IImageEvaluator::copyOutputToTexture", [&]()
+			RENDERER_DISPATCH_FLOATING_TYPES(inputTensor.scalar_type(), "IImageEvaluator::copyOutputToTexture", [&]()
 				{
-					const auto acc = accessor<::kernel::Tensor4Read<scalar_t>>(output);
-					::kernel::Tonemapping(
-						width, height, acc, texture,
-						maxExposure,
-						stream);
+					const auto accIn = accessor<::kernel::Tensor4Read<scalar_t>>(inputTensor);
+					if (std::holds_alternative<torch::Tensor>(output))
+					{
+						auto& t = std::get<torch::Tensor>(output);
+						auto accOut = accessor<::kernel::Tensor4RW<scalar_t>>(t);
+						::kernel::Tonemapping(
+							width, height, B, accIn, accOut,
+							maxExposure,
+							stream);
+					}
+					else
+					{
+						GLubyte* t = std::get<GLubyte*>(output);
+						::kernel::Tonemapping(
+							width, height, accIn, t,
+							maxExposure,
+							stream);
+					}
 				});
 			return;
 		}
+		else if (std::holds_alternative<torch::Tensor>(output))
+        {
+			auto& t = std::get<torch::Tensor>(output);
+			t.copy_(inputTensor.slice(1, 0, 4)); //fast-track
+        }
 		r = 0; g = 1; b = 2; a = 3;
 		scaleRGB = 1; offsetRGB = 0;
 		scaleA = 1; offsetA = 0;
@@ -59,8 +92,8 @@ void renderer::IImageEvaluator::copyOutputToTexture(
 	case ChannelMode::ChannelDepth:
 	{
 		//TODO: only select pixels that contain data
-		float minDepth = output.select(1, 7).min().item().toFloat();
-		float maxDepth = output.select(1, 7).max().item().toFloat();
+		float minDepth = inputTensor.select(1, 7).min().item().toFloat();
+		float maxDepth = inputTensor.select(1, 7).max().item().toFloat();
 		r = g = b = 7; a = 3;
 		scaleRGB = 1 / (maxDepth - minDepth);
 		offsetRGB = -minDepth / (maxDepth - minDepth);
@@ -78,15 +111,29 @@ void renderer::IImageEvaluator::copyOutputToTexture(
 		scaleA = 1; offsetA = 0;
 	}
 
-	RENDERER_DISPATCH_FLOATING_TYPES(output.scalar_type(), "IImageEvaluator::copyOutputToTexture", [&]()
+	RENDERER_DISPATCH_FLOATING_TYPES(inputTensor.scalar_type(), "IImageEvaluator::copyOutputToTexture", [&]()
 		{
-			const auto acc = accessor<::kernel::Tensor4Read<scalar_t>>(output);
-			::kernel::CopyOutputToTexture(
-				width, height, acc, texture,
-				r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA,
-				stream);
+			const auto accIn = accessor<::kernel::Tensor4Read<scalar_t>>(inputTensor);
+			if (std::holds_alternative<torch::Tensor>(output))
+			{
+				auto& t = std::get<torch::Tensor>(output);
+				auto accOut = accessor<::kernel::Tensor4RW<scalar_t>>(t);
+				::kernel::CopyOutputToTexture(
+					width, height, B, accIn, accOut,
+					r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA,
+					stream);
+			}
+			else
+			{
+				GLubyte* t = std::get<GLubyte*>(output);
+				::kernel::CopyOutputToTexture(
+					width, height, accIn, t,
+					r, g, b, a, scaleRGB, offsetRGB, scaleA, offsetA,
+					stream);
+			}
 		});
 }
+
 
 int renderer::IImageEvaluator::computeBatchCount()
 {
@@ -152,6 +199,7 @@ renderer::KernelLoader::KernelFunction renderer::IImageEvaluator::getKernel(
 {
 	std::stringstream defines;
 	std::stringstream includes;
+	std::stringstream extraModuleSource;
 	std::vector<std::string> constantNames;
 
 	defines << "#define KERNEL_DOUBLE_PRECISION "
@@ -173,6 +221,7 @@ renderer::KernelLoader::KernelFunction renderer::IImageEvaluator::getKernel(
 				"// " << km->getTag() << " : " << km->getName() << "\n";
 			for (const auto& i : km->getIncludeFileNames(s))
 				includes << "#include \"" << i << "\"\n";
+			km->fillExtraSourceCode(s, extraModuleSource);
 			const auto c = km->getConstantDeclarationName(s);
 			if (!c.empty())
 				constantNames.push_back(c);
@@ -181,6 +230,7 @@ renderer::KernelLoader::KernelFunction renderer::IImageEvaluator::getKernel(
 
 	std::stringstream sourceFile;
 	sourceFile << "// DEFINES:\n" << defines.str()
+		<< "\n// EXTRA SOURCES:\n" << extraModuleSource.str()
 		<< "\n// INCLUDES:\n" << includes.str()
 		<< "\n// MAIN SOURCE:\n" << extraSource;
 
@@ -287,7 +337,7 @@ void renderer::IImageEvaluator::registerPybindModule(pybind11::module& m)
 		.value("Depth", ChannelMode::ChannelDepth)
 		.value("Color", ChannelMode::ChannelColor)
 		.export_values();
-	c.def_readwrite("selected_channel", &IImageEvaluator::selectedChannel_)
+	c.def_property("selected_channel", &IImageEvaluator::selectedChannel, &IImageEvaluator::setSelectedChannel)
 		.def_readwrite("double_precision", &IImageEvaluator::isDoublePrecision_)
 		.def("render", [](IImageEvaluator* self, int width, int height)
 			{

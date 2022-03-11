@@ -155,6 +155,11 @@ add_subdirectory(imgui)
 add_subdirectory(third-party/pybind11)
 
 ####################################
+# COMPRESSION
+####################################
+add_subdirectory(compression)
+
+####################################
 # THE LIBRARY
 ####################################
 add_subdirectory(renderer)

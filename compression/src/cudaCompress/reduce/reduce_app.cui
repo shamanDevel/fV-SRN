@@ -1,0 +1,144 @@
+#include <cudaCompress/global.h>
+
+#include <cstdio>
+
+#include <cudaCompress/tools/Operator.h>
+#include <cudaCompress/tools/Functor.h>
+
+#include <cudaCompress/util.h>
+#include <cudaCompress/cudaUtil.h>
+
+#include "reduce_plan.h"
+
+#include "reduce_kernel.cui"
+
+
+namespace cudaCompress {
+
+inline bool isPowerOfTwo(int n)
+{
+    return ((n&(n-1))==0);
+}
+
+inline uint ceilPow2(uint x) 
+{
+    --x;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    return ++x;
+}
+
+/**
+  * @brief Per-block reduction function
+  *
+  * This function dispatches the appropriate reduction kernel given the size of the blocks.
+  *
+  * @param[out] d_odata The output data pointer.  Each block writes a single output element.
+  * @param[in]  d_idata The input data pointer.  
+  * @param[in]  numElements The number of elements to be reduced.
+  * @param[in]  plan A pointer to the plan structure for the reduction.
+*/
+template <typename T, typename Oper, typename Func>
+void reduceBlocks(T* d_odata, const T* d_idata, uint numElements, const ReducePlan* plan)
+{
+    uint numThreads = ((numElements > 2 * plan->m_threadsPerBlock) ? plan->m_threadsPerBlock : max(ceilPow2(numElements), 2) / 2);
+    dim3 dimBlock(numThreads, 1, 1);
+    unsigned int numBlocks = max(1, min(plan->m_maxBlocks, (numElements + (2*plan->m_threadsPerBlock - 1)) / (2*plan->m_threadsPerBlock)));
+
+    dim3 dimGrid(numBlocks, 1, 1);
+    int smemSize = plan->m_threadsPerBlock * sizeof(T);
+
+    // choose which of the optimized versions of reduction to launch
+    
+    if (isPowerOfTwo(numElements))
+    {
+        switch (dimBlock.x)
+        {
+        case 512:
+            reduce<T, Oper, Func, 512, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 256:
+            reduce<T, Oper, Func, 256, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 128:
+            reduce<T, Oper, Func, 128, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 64:
+            reduce<T, Oper, Func,  64, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 32:
+            reduce<T, Oper, Func,  32, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 16:
+            reduce<T, Oper, Func,  16, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  8:
+            reduce<T, Oper, Func,   8, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  4:
+            reduce<T, Oper, Func,   4, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  2:
+            reduce<T, Oper, Func,   2, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  1:
+            reduce<T, Oper, Func,   1, true><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        }
+    }
+    else
+    {
+        switch (dimBlock.x)
+        {
+        case 512:
+            reduce<T, Oper, Func, 512, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 256:
+            reduce<T, Oper, Func, 256, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 128:
+            reduce<T, Oper, Func, 128, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 64:
+            reduce<T, Oper, Func,  64, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 32:
+            reduce<T, Oper, Func,  32, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case 16:
+            reduce<T, Oper, Func,  16, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  8:
+            reduce<T, Oper, Func,   8, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  4:
+            reduce<T, Oper, Func,   4, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  2:
+            reduce<T, Oper, Func,   2, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        case  1:
+            reduce<T, Oper, Func,   1, false><<< dimGrid, dimBlock, smemSize >>>(d_odata, d_idata, numElements); break;
+        }
+    }
+
+    cudaCheckMsg("Reduce");
+}
+
+/**
+  * @brief Array reduction function.
+  *
+  * Performs multi-level reduction on large arrays using reduceBlocks().  
+  *
+  * @param [out] d_odata The output data pointer.  This is a pointer to a single element.
+  * @param [in]  d_idata The input data pointer.  
+  * @param [in]  numElements The number of elements to be reduced.
+  * @param [in]  plan A pointer to the plan structure for the reduction.
+*/
+template <typename T, typename Oper, typename Func>
+void reduceArray(T *d_odata, const T *d_idata, size_t numElements, const ReducePlan* plan)
+{
+    uint numBlocks = min(plan->m_maxBlocks, (uint(numElements) + (2*plan->m_threadsPerBlock - 1)) / (2*plan->m_threadsPerBlock));
+
+    if (numBlocks > 1)
+    {
+        reduceBlocks<T, Oper, Func>((T*)plan->m_blockSums, d_idata, uint(numElements), plan);
+        reduceBlocks<T, Oper, FunctorIdentity<T>>(d_odata, (const T*)plan->m_blockSums, numBlocks, plan);
+    }
+    else
+    {
+        reduceBlocks<T, Oper, Func>(d_odata, d_idata, uint(numElements), plan);
+    }
+}
+
+template <typename T, typename Oper>
+void reduceArray(T *d_odata, const T *d_idata, size_t numElements, const ReducePlan* plan)
+{
+    reduceArray<T, Oper, FunctorIdentity<T>>(d_odata, d_idata, numElements, plan);
+}
+
+}

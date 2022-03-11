@@ -9,6 +9,8 @@
 	TORCH_CHECK((x.dim() == (d)), #x " must be a tensor with ", d, " dimensions, but has shape ", x.sizes())
 #define CHECK_SIZE(x, d, s) TORCH_CHECK((x.size(d) == (s)), #x " must have ", s, " entries at dimension ", d, ", but has ", x.size(d), " entries")
 #define CHECK_DTYPE(x, t) TORCH_CHECK(x.dtype()==t, #x " must be of type ", t, ", but is ", x.dtype())
+#define CHECK_MATCHING_DTYPE(x1, x2) TORCH_CHECK(x1.dtype()==x2.dtype(), \
+    "Dtypes of the input tensors must be identical, but the dtype of " #x1 " is ", x1.dtype(), " and of " #x2 " is ", x2.dtype())
 inline int checkBatch(const torch::Tensor& t, const char* name, int B1, int batchIndex = 0)
 {
 	int B2 = t.size(batchIndex);
