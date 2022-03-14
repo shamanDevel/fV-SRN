@@ -35,16 +35,18 @@ The project consists of a C++/CUDA part that has to be compiled first:
 - `bindings`: entry point to the Python bindings, after compilation leads to a python extension module `pyrenderer`, placed in `bin`
 - `gui`: the interactive GUI to design the config files, explore the reference datasets and the trained networks. Requires OpenGL
 
-For compilation, we recommend CMake. For running on a headless server, specifiy `-DRENDERER_BUILD_OPENGL_SUPPORT=Off -DRENDERER_BUILD_GUI=Off`.
+For compilation, we recommend CMake. For running on a headless server, specify `-DRENDERER_BUILD_OPENGL_SUPPORT=Off -DRENDERER_BUILD_GUI=Off`.
 Alternatively, `compile-library-server.sh` is provided for compilation with the built-in extension compiler of PyTorch. We use this for compilation on our headless GPU server, as it simplifies potential wrong dependencies to different CUDA, Python or PyTorch versions with different virtualenvs or conda environments.
 
 After compiling the C++ library, the network training and evaluation is performed in Python. The python files are all found in `applications`:
 
 - `applications/volumes` the volumes used in the ablation studies
-- `applicatiosn/config-files` the config files
+- `applications/config-files` the config files
 - `applications/common`: common utilities, especially `utils.py` for loading the `pyrenderer` library and other helpers
 - `applications/losses`: the loss functions, including SSIM and LPIPS
 - `applications/volnet`: the main network code for training in inference, see below.
+
+To generate a stubfile with all the Python functions exposed by the renderer, launch `python applications/common/create_sub.py`
 
 ### Common compilation issues
 
@@ -89,7 +91,7 @@ The training is launched via `applications/volnet/train_volnet.py`. Have a look 
 
 A typical invocation looks like this (this is how fV-SRN with Ejecta from Fig. 1 was trained)
 
-    python volnet/train_volnet.py
+    python train_volnet.py
        config-files/ejecta70-v6-dvr.json
        --train:mode world  # instead of 'screen', Sec. 5.4
        --train:samples 256**3
@@ -106,7 +108,7 @@ A typical invocation looks like this (this is how fV-SRN with Ejecta from Fig. 1
        --volumetric_features_resolution 32  # the grid specification, see Sec. 5.2
        --volumetric_features_channels 16
        -l1 1  #use L1-loss with weight 1
-       -lr 0.01
+       --lr 0.01
        --lr_step 100  #lr reduction after 100 epochs, default lr is used 
        -i 200  # number of epochs
        --save_frequency 20  # checkpoints + test visualization
@@ -120,18 +122,27 @@ Each figure is associated with a respective script in `applications/volnet`. Tho
 - Figure 1, teaser: `applications/volnet/eval_CompressionTeaser.py`
 - Table 1, possible architectures: `applications/volnet/collect_possible_layers.py`
 - Section 4.2, change to performance due to grid compression: `applications/volnet/eval_VolumetricFeatures_GridEncoding`
-- Figure 3, performance of the networks:  `applications/volnet/eval_NetworkConfigsGrid.py`
-- Section 5, study on the activation functions:  `applications/volnet/eval_ActivationFunctions.py`
-- Figure 4+5, latent grid, also includes other datasets:  `applications/volnet/eval_VolumetricFeatures.py`
-- Figure 6, density-vs-color:
+- Figure 4, performance of the networks:  `applications/volnet/eval_NetworkConfigsGrid.py`
+- Figure 5+6, latent grid, also includes other datasets:  `applications/volnet/eval_VolumetricFeatures.py`
+- Figure 7, Fourier features:  `applications/volnet/eval_Fourier_Grid.py` , includes the datasets not shown in the paper for space reasons
+- Figure 8, density-vs-color:
    `applications/volnet/eval_world_DensityVsColorGrid_NoImportance.py` without initial importance sampling and adaptive resampling (Fig. 6)
   `applications/volnet/eval_world_DensityVsColorGrid.py` , includes initial importance sampling, not shown
-  `applications/volnet/eval_world_DensityVsColorGrid_WithResampling.py` , with initial importance sampling and adaptive resampling, improvement reported in Section 5.3
-- Table 2, Figure 7, screen-vs-world:  `applications/volnet/eval_ScreenVsWorld_GridNeRF.py`
-- Figure 8, Fourier features:  `applications/volnet/eval_Fourier_Grid.py` , includes the datasets not shown in the paper for space reasons
-- Figure 9,10, time-dependent fields:
+  `applications/volnet/eval_world_DensityVsColorGrid_WithResampling.py` , with initial importance sampling and adaptive resampling, improvement reported in Section 5.4
+- Figure 9, gradient prediction: `applications/volnet/eval_GradientNetworks1_v2.py`
+- Figure 10, curvature prediction: `applications/volnet/eval_CurvatureNetworks2.py`
+- Figure 11, 12, comparison with baseline methods: `applications/volnet/eval_CompressionExtended.py`
+- Figure 13,14, time-dependent fields:
    `applications/volnet/eval_TimeVolumetricFeatures.py`: train on every fifth timestep
    `applications/volnet/eval_TimeVolumetricFeatures2.py`: train on every second timestep
-   `applications/volnet/eval_TimeVolumetricFeatures_plotPaper.py`: assembles the plot for Figure 9
+   `applications/volnet/eval_TimeVolumetricFeatures_plotPaper.py`: assembles the plot for Figure 14
+
+Supplementary Paper:
+
+- Section 1, study on the activation functions:  `applications/volnet/eval_ActivationFunctions.py`
+- Table 2, Figure 1, screen-vs-world:  `applications/volnet/eval_ScreenVsWorld_GridNeRF.py`
+- Figure 2-6, ablation study for gradients:  `applications/volnet/eval_GradientNetworks1_v2.py`, `applications/volnet/eval_GradientNetworks2.py`
+- Figure 8, comparison with baseline methods: `applications/volnet/eval_CompressionExtended.py`
 
 The other `eval_*.py` scripts were cut from the paper due to space limitations. They equal the tests above, except that no grid was used and instead the largest possible networks fitting into the TC-architecture
+
