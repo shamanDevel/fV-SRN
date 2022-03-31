@@ -86,6 +86,8 @@ public:
 	void fillConstantMemory(const GlobalSettings& s, CUdeviceptr ptr, CUstream stream) override;
 protected:
 	virtual void fillConstantMemoryTF(const GlobalSettings& s, CUdeviceptr ptr, double stepsize, CUstream stream) = 0;
+
+	virtual void drawUIHistogram(UIStorage_t& storage, const ImRect& histogramRect);
 };
 typedef std::shared_ptr<ITransferFunction> ITransferFunction_ptr;
 

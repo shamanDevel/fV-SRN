@@ -13,6 +13,7 @@
 #include "ray_evaluation_stepping.h"
 #include "renderer_tensor.cuh"
 #include "volume_interpolation.h"
+#include "volume_interpolation_grid.h"
 
 const std::string renderer::ITransferFunction::UI_KEY_ABSORPTION_SCALING
 	= "TF::absorptionScaling";
@@ -159,6 +160,57 @@ void renderer::ITransferFunction::fillConstantMemory(const GlobalSettings& s, CU
 		stepsize = rayEval->getStepsizeWorld();
 	}
 	this->fillConstantMemoryTF(s, ptr, stepsize, stream);
+}
+
+struct HistogramData
+{
+	renderer::VolumeInterpolationGrid::HistogramValue* histo;
+	int offset;
+};
+static float histogramGetter(void* data, int idx)
+{
+	const auto* histo = reinterpret_cast<
+		HistogramData*>(data);
+	idx += histo->offset;
+	if (idx < 0 || idx >= histo->histo->NUM_BINS) return 0.f;
+	return static_cast<float>(histo->histo->bins[idx]) / histo->histo->maxBinValue;
+}
+void renderer::ITransferFunction::drawUIHistogram(UIStorage_t& storage, const ImRect& histogramRect)
+{
+	//histogram
+	VolumeInterpolationGrid::HistogramValue_ptr histogram;
+	if (const auto& it = storage.find(VolumeInterpolationGrid::UI_KEY_HISTOGRAM);
+		it != storage.end())
+	{
+		histogram = it->second.has_value()
+			? std::any_cast<VolumeInterpolationGrid::HistogramValue_ptr>(it->second)
+			: nullptr;
+	}
+	if (histogram) {
+		double minDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MIN_DENSITY, 0.0);
+		double maxDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MAX_DENSITY, 1.0);
+		auto histogramRes = (histogram->maxDensity - histogram->minDensity) / histogram->NUM_BINS;
+		int histogramBeginOffset = (minDensity - histogram->minDensity) / histogramRes;
+		int histogramEndOffset = (histogram->maxDensity - maxDensity) / histogramRes;
+		auto maxElement = std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset);
+	    auto maxFractionVal =
+			maxElement
+			? static_cast<float>(*maxElement) / histogram->maxBinValue
+			: 1.0f;
+		HistogramData data{ histogram.get(), histogramBeginOffset };
+		ImGui::PlotHistogram("##Histogram", histogramGetter, &data,
+			histogram->NUM_BINS - histogramEndOffset - histogramBeginOffset,
+			0, nullptr, 0.0f, maxFractionVal, 
+			histogramRect.GetSize());
+	}
+	else
+	{
+		ImGuiWindow* window = ImGui::GetCurrentWindow();
+		ImGuiContext& g = *GImGui;
+		const ImGuiStyle& style = g.Style;
+		ImGui::ItemSize(histogramRect, style.FramePadding.y);
+		ImGui::ItemAdd(histogramRect, window->GetID("TF Editor Histogram Dummy"));
+	}
 }
 
 bool renderer::ITransferFunction::requiresGradients() const

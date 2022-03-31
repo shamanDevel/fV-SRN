@@ -5,12 +5,14 @@
 #include "parameter.h"
 #include "volume.h"
 #include "background_worker.h"
+#include "lru_cache.h"
+#include "renderer_histogram.cuh"
 #include <torch/types.h>
 #include <filesystem>
 
-BEGIN_RENDERER_NAMESPACE
 
-/**
+BEGIN_RENDERER_NAMESPACE
+    /**
  * \brief volume interpolation using a regular grid of voxels.
  * The input can either be a 3D texture or a torch::Tensor.
  * Interpolation modes: nearest neighbor, trilinear, tricubic.
@@ -85,16 +87,55 @@ public:
 		int featureIndex;
 	};
 
+	/**
+	 * Key for the histogram cache
+	 */
+	struct HistogramKey
+	{
+		Volume* volumePtr;
+		int featureIndex;
+		int mipmapLevel;
+		Feature2Density mapping;
+
+        friend std::size_t hash_value(const HistogramKey& obj) noexcept
+        {
+            std::size_t seed = 0x7FAC4D7E;
+            seed ^= (seed << 6) + (seed >> 2) + 0x3036D8A5 + reinterpret_cast<std::size_t>(obj.volumePtr);
+            seed ^= (seed << 6) + (seed >> 2) + 0x39C1F81A + static_cast<std::size_t>(obj.featureIndex);
+            seed ^= (seed << 6) + (seed >> 2) + 0x579D9BDC + static_cast<std::size_t>(obj.mipmapLevel);
+            seed ^= (seed << 6) + (seed >> 2) + 0x6C276826 + static_cast<std::size_t>(obj.mapping);
+            return seed;
+        }
+
+        friend bool operator==(const HistogramKey& lhs, const HistogramKey& rhs)
+        {
+            return lhs.volumePtr == rhs.volumePtr
+                && lhs.featureIndex == rhs.featureIndex
+                && lhs.mipmapLevel == rhs.mipmapLevel
+                && lhs.mapping == rhs.mapping;
+        }
+
+        friend bool operator!=(const HistogramKey& lhs, const HistogramKey& rhs)
+        {
+            return !(lhs == rhs);
+        }
+    };
+	/**
+	 * The actual histogram
+	 */
+	typedef kernel::VolumeHistogram HistogramValue;
+	typedef kernel::VolumeHistogram_ptr HistogramValue_ptr;
+
 private:
 	VolumeSource source_;
 	VolumeInterpolation interpolation_;
+
 	float minDensity_;
 	float maxDensity_;
 
 	//source = Texture
 	Volume_ptr volume_;
 	int mipmapLevel_;
-	Volume::Histogram_ptr histogram_;
 	std::vector<FeatureDescriptorDensity> availableDensityFeatures_;
 	int selectedDensityFeatureIndex_;
 	std::vector<FeatureDescriptorVelocity> availableVelocityFeatures_;
@@ -115,6 +156,16 @@ private:
 	int currentEnsemble_;
 	int currentTimestep_;
 
+	//histogram
+	static constexpr auto histogramHash = [](const HistogramKey& k) {return hash_value(k); };
+	LRUCache<HistogramKey, HistogramValue_ptr, decltype(histogramHash)> histogramCache_;
+	cudaStream_t histogramStream_;
+	cudaEvent_t histogramCompletionEvent_;
+	HistogramKey histogramCurrentKey_;
+	bool histogramExtractionRunning_;
+	kernel::VolumeHistogram* histogramDevice_;
+	kernel::VolumeHistogram histogramHost_;
+
 	/*
 	 * Switches between old and now behavior for the conversion from normalized world coords to object coords.
 	 * Old: multiply position with (resolution-1), introduces slight offset when using mipmaps
@@ -124,6 +175,7 @@ private:
 
 public:
 	VolumeInterpolationGrid();
+	~VolumeInterpolationGrid() override;
 
 	/**
 	 * Sets the source to the volume and mipmap level
@@ -172,10 +224,12 @@ public:
 
 	[[nodiscard]] int mipmapLevel() const;
 
-	[[nodiscard]] Volume::Histogram_ptr histogram() const
-	{
-		return histogram_;
-	}
+	/**
+	 * Requests the histogram for the current volume, feature, mipmap level
+	 * and feature mapping.
+	 * If the histogram is not yet computed, a nullptr is returned
+	 */
+	[[nodiscard]] HistogramValue_ptr requestHistogram();
 
 	[[nodiscard]] Parameter<torch::Tensor> tensor() const;
 

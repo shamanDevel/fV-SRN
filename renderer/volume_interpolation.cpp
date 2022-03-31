@@ -91,7 +91,7 @@ torch::Tensor renderer::IVolumeInterpolation::evaluate(
 	if (s.fixedBlockSize>0)
 	{
 		if (s.fixedBlockSize > fun.bestBlockSize())
-			throw std::runtime_error("larger block size requested that can be fullfilled");
+			throw std::runtime_error("larger block size requested that can be fulfilled");
 		blockSize = s.fixedBlockSize;
 	} else
 	{

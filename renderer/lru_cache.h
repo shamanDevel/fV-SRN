@@ -30,6 +30,9 @@ public:
 	LRUCache(int cache_size_) : cache_size(cache_size_)
 	{
 	}
+	LRUCache(int cache_size_, const HASH_T& hash)
+	    : cache_size(cache_size_), item_map(8, hash)
+	{}
 
 	void put(const KEY_T& key, const VAL_T& val)
 	{

@@ -8,6 +8,7 @@
 #include "helper_math.cuh"
 #include "IconsFontAwesome5.h"
 #include "imgui_internal.h"
+#include "kernel_loader.h"
 #include "renderer_tensor.cuh"
 #include "pytorch_utils.h"
 #include "renderer_commons.cuh"
@@ -51,16 +52,33 @@ renderer::VolumeInterpolationGrid::VolumeInterpolationGrid()
 	: IVolumeInterpolation(true)
    , source_(VolumeSource::EMPTY)
    , interpolation_(VolumeInterpolation::NEAREST_NEIGHBOR)
+   , minDensity_(0)
+   , maxDensity_(1)
    , mipmapLevel_(0)
-   , currentEnsemble_(0)
-   , currentTimestep_(0)
    , selectedDensityFeatureIndex_(0)
    , selectedVelocityFeatureIndex_(0)
    , selectedColorFeatureIndex_(0)
-   , minDensity_(0)
-   , maxDensity_(1)
+   , currentEnsemble_(0)
+   , currentTimestep_(0)
+   , histogramCache_(100, histogramHash)
+   , histogramStream_(0)
+   , histogramCompletionEvent_(0)
+   , histogramExtractionRunning_(false)
+   , histogramDevice_(nullptr)
    , gridResolutionNewBehavior_(false)
-{}
+{
+	CUMAT_SAFE_CALL(cudaStreamCreate(&histogramStream_));
+	CUMAT_SAFE_CALL(cudaEventCreateWithFlags(
+		&histogramCompletionEvent_, cudaEventBlockingSync | cudaEventDisableTiming));
+	CUMAT_SAFE_CALL(cudaMalloc(&histogramDevice_, sizeof(kernel::VolumeHistogram)));
+}
+
+renderer::VolumeInterpolationGrid::~VolumeInterpolationGrid()
+{
+	CUMAT_SAFE_CALL_NO_THROW(cudaStreamDestroy(histogramStream_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaEventDestroy(histogramCompletionEvent_));
+	CUMAT_SAFE_CALL_NO_THROW(cudaFree(histogramDevice_));
+}
 
 bool renderer::VolumeInterpolationGrid::extractDensityFeaturesFromVolume()
 {
@@ -178,14 +196,6 @@ void renderer::VolumeInterpolationGrid::setSource(Volume_ptr v, int mipmap)
 	setObjectResolution(feature->getLevel(mipmap)->size());
 	setBoxMin(-worldSize / 2.0);
 	setBoxMax( worldSize / 2.0);
-
-	if (changed) {
-		//TODO: this is quite the bottleneck sometimes.
-		// Save the histogram in the volume file?
-		histogram_ = feature->extractHistogram();
-		minDensity_ = histogram_->minDensity; //(minDensity_ < histogram_->maxDensity&& minDensity_ > histogram_->minDensity) ? minDensity_ : histogram_->minDensity;
-		maxDensity_ = histogram_->maxDensity; //(maxDensity_ < histogram_->maxDensity&& maxDensity_ > histogram_->minDensity) ? maxDensity_ : histogram_->maxDensity;
-	}
 }
 
 void renderer::VolumeInterpolationGrid::setSource(const torch::Tensor& t)
@@ -202,7 +212,6 @@ void renderer::VolumeInterpolationGrid::setSource(const torch::Tensor& t)
 	tensor_.grad = torch::Tensor();
 	tensor_.forwardIndex = torch::Tensor();
 
-	histogram_ = nullptr;
 	minDensity_ = torch::min(t).item().toFloat();
 	maxDensity_ = torch::max(t).item().toFloat();
 
@@ -486,15 +495,23 @@ bool renderer::VolumeInterpolationGrid::drawUI(UIStorage_t& storage)
 	{
 		changed = true;
 	}
-	
+
+	//histogram
+	HistogramValue_ptr histogram = requestHistogram();
+	if (histogram)
+	{
+		minDensity_ = histogram->minDensity;
+		maxDensity_ = histogram->maxDensity;
+	}
 	ImGui::Text("Resolution: %d, %d, %d\nDensity: min=%.3f, max=%.3f",
 		objectResolution().x, objectResolution().y, objectResolution().z,
 		minDensity(), maxDensity());
 
 	//UI Storage
-	storage[UI_KEY_HISTOGRAM] = histogram_;
-	storage[UI_KEY_MIN_DENSITY] = static_cast<float>(minDensity_);
-	storage[UI_KEY_MAX_DENSITY] = static_cast<float>(maxDensity_);
+
+	storage[UI_KEY_HISTOGRAM] = histogram;
+	storage[UI_KEY_MIN_DENSITY] = static_cast<float>(minDensity());
+	storage[UI_KEY_MAX_DENSITY] = static_cast<float>(maxDensity());
 	
 	if (backgroundGui_)
 		backgroundGui_();
@@ -505,6 +522,110 @@ bool renderer::VolumeInterpolationGrid::drawUI(UIStorage_t& storage)
 		changed = true;
 	}
 	return changed;
+}
+
+renderer::VolumeInterpolationGrid::HistogramValue_ptr renderer::VolumeInterpolationGrid::requestHistogram()
+{
+	HistogramKey key;
+	key.volumePtr = volume_.get();
+	key.featureIndex = availableDensityFeatures_[selectedDensityFeatureIndex_].featureIndex;
+	key.mipmapLevel = mipmapLevel_;
+	key.mapping = availableDensityFeatures_[selectedDensityFeatureIndex_].mapping;
+
+	if (histogramCache_.exist(key))
+	{
+		return histogramCache_.get(key);
+	}
+
+	if (histogramExtractionRunning_) {
+		//already an extraction is running
+		//check if done
+		auto status = cudaEventQuery(histogramCompletionEvent_);
+		if (status == cudaSuccess)
+		{
+		    //we are done, emplace in cache
+			histogramExtractionRunning_ = false;
+			HistogramValue_ptr histo = std::make_shared<kernel::VolumeHistogram>(histogramHost_);
+			histogramCache_.put(histogramCurrentKey_, histo);
+			if (histogramCurrentKey_ == key)
+			{
+			    //we are still at the same key, return
+				return histo;
+			}
+			//key has changed, we have to start the extraction again -> below
+		}
+		else if (status == cudaErrorNotReady)
+		{
+		    //not done yet
+			return nullptr;
+		} else
+		{
+		    //error!
+			printError(static_cast<CUresult>(status), "Error while waiting for histogram extraction kernel");
+			return nullptr;
+		}
+	}
+
+	//start extraction
+
+	//clear histogram
+	kernel::VolumeHistogram* histogramOutDevice = histogramDevice_;
+	CUMAT_SAFE_CALL(cudaMemsetAsync(histogramOutDevice, 0, sizeof(kernel::VolumeHistogram), histogramStream_));
+
+	//compile kernel
+	GlobalSettings s{};
+	s.scalarType = GlobalSettings::kFloat;
+	s.volumeShouldProvideNormals = false;
+	s.interpolationInObjectSpace = true;
+	this->prepareRendering(s);
+	const std::string kernelName = "HistogramExtractKernel";
+	std::vector<std::string> constantNames;
+	if (const auto c = getConstantDeclarationName(s); !c.empty())
+		constantNames.push_back(c);
+	std::stringstream extraSource;
+	extraSource << "#define KERNEL_DOUBLE_PRECISION 0\n";
+	extraSource << "#define KERNEL_SYNCHRONIZED_TRACING 0\n";
+	extraSource << getDefines(s) << "\n";
+	fillExtraSourceCode(s, extraSource);
+	for (const auto& i : getIncludeFileNames(s))
+		extraSource << "\n#include \"" << i << "\"\n";
+	extraSource << "#define VOLUME_INTERPOLATION_T " <<
+		getPerThreadType(s) << "\n";
+	extraSource << "#include \"renderer_volume_kernels6.cuh\"\n";
+	const auto fun0 = KernelLoader::Instance().getKernelFunction(
+		kernelName, extraSource.str(), constantNames, false, false);
+	if (!fun0.has_value())
+		throw std::runtime_error("Unable to compile kernel");
+	const auto fun = fun0.value();
+	if (auto c = getConstantDeclarationName(s); !c.empty())
+	{
+		CUdeviceptr ptr = fun.constant(c);
+		fillConstantMemory(s, ptr, histogramStream_);
+	}
+
+	//launch kernel
+	int gridSize = 1;
+	int blockSize = fun.bestBlockSize();
+	const void* args[] = { &histogramOutDevice };
+	auto result = cuLaunchKernel(
+		fun.fun(), gridSize, 1, 1, blockSize, 1, 1,
+		0, histogramStream_, const_cast<void**>(args), NULL);
+	if (result != CUDA_SUCCESS) {
+		printError(result, kernelName);
+		return nullptr;
+	}
+
+	//copy results back
+	CUMAT_SAFE_CALL(cudaMemcpyAsync(
+		&histogramHost_, histogramOutDevice, sizeof(kernel::VolumeHistogram),
+		cudaMemcpyDeviceToHost, histogramStream_));
+
+	//record event for completion notifiation
+	CUMAT_SAFE_CALL(cudaEventRecord(histogramCompletionEvent_, histogramStream_));
+	histogramExtractionRunning_ = true;
+	histogramCurrentKey_ = key;
+
+	return nullptr; //not done yet
 }
 
 void renderer::VolumeInterpolationGrid::loadVolumeDialog()
@@ -659,7 +780,6 @@ void renderer::VolumeInterpolationGrid::load(const nlohmann::json& json, const I
 	{
 		volumeFullFilename_ = std::filesystem::path();
 		volume_ = nullptr;
-		histogram_ = nullptr;
 		auto filename = std::filesystem::path(json.value("volumePath", ""));
 		if (filename.is_relative())
 			filename = absolute(fetcher->getRootPath() / filename);

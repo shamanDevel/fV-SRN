@@ -14,6 +14,7 @@
 
 #include "commons.h"
 #include "lru_cache.h"
+#include "renderer_histogram.cuh"
 
 #ifdef _WIN32
 #pragma warning( push )
@@ -78,19 +79,6 @@ typedef std::function<void(const std::string&, int)> VolumeErrorCallback_t;
 class MY_API Volume
 {
 public:
-	template<int numOfBins>
-	struct VolumeHistogram
-	{
-		float bins[numOfBins]{ 0.0f };
-		float minDensity{ FLT_MAX };
-		float maxDensity{ -FLT_MAX };
-		float maxFractionVal{ 1.0f };
-		unsigned int numOfNonzeroVoxels{ 0 };
-
-		constexpr int getNumOfBins() const { return numOfBins; }
-	};
-	using Histogram = VolumeHistogram<512>;
-	using Histogram_ptr = std::shared_ptr<Histogram>;
 
 	enum DataType
 	{
@@ -294,11 +282,6 @@ public:
 		 * This is used for the LRU-cache in VolumeEnsembleFactory
 		 */
 		size_t estimateMemory() const;
-
-		/**
-	     * Creates the histogram of the volume.
-	     */
-		[[nodiscard]] Volume::Histogram_ptr extractHistogram() const;
 
     };
 	typedef std::shared_ptr<Feature> Feature_ptr;

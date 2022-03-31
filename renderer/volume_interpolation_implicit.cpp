@@ -156,7 +156,7 @@ bool renderer::VolumeInterpolationImplicit::drawUI(UIStorage_t& storage)
         selectedImplicitFunction_->boxSize());
 
     //UI Storage
-    storage[VolumeInterpolationGrid::UI_KEY_HISTOGRAM] = Volume::Histogram_ptr();
+    storage[VolumeInterpolationGrid::UI_KEY_HISTOGRAM] = nullptr;
     storage[VolumeInterpolationGrid::UI_KEY_MIN_DENSITY] = static_cast<float>(selectedImplicitFunction_->valueMin());
     storage[VolumeInterpolationGrid::UI_KEY_MAX_DENSITY] = static_cast<float>(selectedImplicitFunction_->valueMax());
 

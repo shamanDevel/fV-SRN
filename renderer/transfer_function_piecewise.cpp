@@ -7,7 +7,6 @@
 #include "pytorch_utils.h"
 #include "renderer_tensor.cuh"
 #include "renderer_tf_piecewise.cuh"
-#include "volume_interpolation_grid.h"
 
 renderer::TransferFunctionPiecewiseLinear::TransferFunctionPiecewiseLinear()
 	: absorptionScaling_(10)
@@ -56,32 +55,7 @@ bool renderer::TransferFunctionPiecewiseLinear::drawUI(UIStorage_t& storage)
 	const ImRect tfEditorOpacityRect(pos, ImVec2(pos.x + tfEditorOpacityWidth, pos.y + tfEditorOpacityHeight));
 
 	//histogram
-	Volume::Histogram_ptr histogram;
-	if (const auto& it = storage.find(VolumeInterpolationGrid::UI_KEY_HISTOGRAM);
-		it != storage.end())
-	{
-		histogram = it->second.has_value()
-			? std::any_cast<Volume::Histogram_ptr>(it->second)
-			: nullptr;
-	}
-	if (histogram) {
-		double minDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MIN_DENSITY, 0.0);
-		double maxDensity = get_or(storage, IRayEvaluation::UI_KEY_SELECTED_MAX_DENSITY, 1.0);
-		auto histogramRes = (histogram->maxDensity - histogram->minDensity) / histogram->getNumOfBins();
-		int histogramBeginOffset = (minDensity - histogram->minDensity) / histogramRes;
-		int histogramEndOffset = (histogram->maxDensity - maxDensity) / histogramRes;
-		auto maxFractionVal =
-			(histogramEndOffset > histogramBeginOffset)
-			? *std::max_element(std::begin(histogram->bins) + histogramBeginOffset, std::end(histogram->bins) - histogramEndOffset)
-			: 1.0f;
-		ImGui::PlotHistogram("", histogram->bins + histogramBeginOffset, histogram->getNumOfBins() - histogramEndOffset - histogramBeginOffset,
-			0, NULL, 0.0f, maxFractionVal, ImVec2(tfEditorOpacityWidth, tfEditorOpacityHeight));
-	}
-	else
-	{
-		ImGui::ItemSize(tfEditorOpacityRect, style.FramePadding.y);
-		ImGui::ItemAdd(tfEditorOpacityRect, window->GetID("TF Editor Histogram Dummy"));
-	}
+	drawUIHistogram(storage, tfEditorOpacityRect);
 
 	//color
 	if (colorEditor_.drawUI(tfEditorColorRect, showColorControlPoints))

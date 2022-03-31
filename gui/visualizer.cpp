@@ -372,7 +372,7 @@ void Visualizer::render(int display_w, int display_h)
 			CUstream stream = renderer::IImageEvaluator::getDefaultStream();
 			outputTensor_ = selectedImageEvaluator_->render(
 				display_w, display_h, stream, refine, outputTensor_);
-			selectedImageEvaluator_->copyOutputToTexture(outputTensor_, screenTextureCudaBuffer_,
+			selectedImageEvaluator_->extractColor(outputTensor_, screenTextureCudaBuffer_,
 				selectedImageEvaluator_->selectedChannel(), stream);
 			auto result = cuStreamSynchronize(stream);
 			if (result != CUDA_SUCCESS)

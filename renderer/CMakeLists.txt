@@ -74,6 +74,8 @@ set(LIBRARY_CUDA_HEADER_FILES
     renderer_volume_kernels3.cuh
     renderer_volume_kernels4.cuh
     renderer_volume_kernels5.cuh
+    renderer_histogram.cuh
+    renderer_volume_kernels6.cuh
     renderer_blending.cuh
     renderer_camera.cuh
     renderer_camera_kernels.cuh
