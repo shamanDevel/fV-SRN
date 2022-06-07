@@ -1,4 +1,5 @@
 #include "memtrace.h"
+#include <cstring>
 #include <cudaCompress/CompressVolume.h>
 
 #include <algorithm>

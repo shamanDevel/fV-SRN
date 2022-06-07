@@ -1,7 +1,7 @@
 #ifndef __TUM3D_CUDACOMPRESS__BIT_STREAM_H__
 #define __TUM3D_CUDACOMPRESS__BIT_STREAM_H__
 
-
+#include <cstring>
 #include <cudaCompress/global.h>
 
 #include <algorithm>

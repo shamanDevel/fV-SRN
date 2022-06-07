@@ -82,7 +82,7 @@ namespace tthresh
                         0ll); // Kernel support: [-a, a], clamped
                     int32_t end = std::max(
                         std::min(static_cast<Eigen::Index>(slice.points[0] + i * slice.points[2] + a + 1), U.rows()),
-                        -1ll);
+                        static_cast<Eigen::Index>(-1ll));
                     double center = slice.points[0] + i * slice.points[2];
                     double kernel_sum = 0;
                     for (int32_t j = start; sign * j < sign * end; j += sign) {

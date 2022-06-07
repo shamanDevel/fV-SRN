@@ -1,5 +1,5 @@
 #include "memtrace.h"
-#include <cudaCompress\RunLength.h>
+#include <cudaCompress/RunLength.h>
 
 #include <cassert>
 #include <string>
