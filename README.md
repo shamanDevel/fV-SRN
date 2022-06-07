@@ -53,6 +53,8 @@ To generate a stubfile with all the Python functions exposed by the renderer, la
 - Wrong python version used: make sure to run cmake in the same console where the correct python version is selected via conda or virtualenv. This must be done on a clean `build`-folder, as the paths to the python libraries are cached in the `build/CMakeCache.txt`-file.
 - Wrong pytorch version used or no pytorch found: Sometimes, the automatic query of the PyTorch installation folder from the current Python installation failes. You can manually specify the path to PyTorch by passing `-DTORCH_PATH=...` as argument to CMake
 - Libraries `torch_cuda_cpp` and `torch_cuda_cu` are not found. Some PyTorch installations don't split the CUDA-kernels into different libraries, but have a single monolitic library `torch_cuda`. In that case, simply remove `torch_cuda_cpp` and `torch_cuda_cu` from https://github.com/shamanDevel/fV-SRN/blob/master/CMakeLists.txt#L125. If you know a way to query if PyTorch was built with the CUDA-kernels split into multiple libraries, please write me or open an issue. Thanks
+- Built errors in Eigen, `std::free` does not point to a function or similar:
+  In this case, you have to patch the file `third-party/cuMat/third-party/Eigen/src/Core/util/Memory.h` and replace all occurrences of `std::free` by `free` and `std::malloc` by `malloc` (remove the explicit std:: namespace)
 
 ## Noteworthy Files
 
