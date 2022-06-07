@@ -287,7 +287,7 @@ void bindCompressionUtils(pybind11::module_& m)
 
     const auto torch2rawFloat = [](const torch::Tensor& t)
     {
-        TORCH_CHECK(t.is_cpu(), "Tensor required to reside on the CPU");
+        TORCH_CHECK(t.device()==at::kCPU, "Tensor required to reside on the CPU");
         TORCH_CHECK(t.dim() == 3, "3D Tensor required, but got shape ", t.sizes());
         TORCH_CHECK(t.dtype() == c10::kFloat, "Float tensor required, but got ", t.dtype());
         TORCH_CHECK(t.is_contiguous(c10::MemoryFormat::Contiguous), "Tensor required to be in c-contiguous format");
@@ -300,7 +300,7 @@ void bindCompressionUtils(pybind11::module_& m)
     };
     const auto torch2rawDouble = [](const torch::Tensor& t)
     {
-        TORCH_CHECK(t.is_cpu(), "Tensor required to reside on the CPU");
+        TORCH_CHECK(t.device()==at::kCPU, "Tensor required to reside on the CPU");
         //TORCH_CHECK(t.dim() == 3, "3D Tensor required, but got shape ", t.sizes());
         TORCH_CHECK(t.dtype() == c10::kDouble, "Double tensor required, but got ", t.dtype());
         TORCH_CHECK(t.is_contiguous(c10::MemoryFormat::Contiguous), "Tensor required to be in c-contiguous format");

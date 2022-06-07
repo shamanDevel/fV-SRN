@@ -2,6 +2,7 @@
 #define __rawfile_h__
 
 #include <string>
+#include <math.h>
 
 #include <cudaCompress/global.h>
 using cudaCompress::byte;

@@ -24,9 +24,12 @@ def get_files(base, filter=".*"):
 _renderer_files = get_files(os.path.join(_root, 'renderer'))
 _compression_files = get_files(os.path.join(_root, 'compression/include')) + get_files(os.path.join(_root, 'compression/src'))
 _binding_files = get_files(os.path.join(_root, 'bindings'))
-_resource_files = get_files(os.path.join(_root, 'build/__cmrc_Renderer-kernels/intermediate')) +\
-    ['build/__cmrc_Renderer-kernels/lib.cpp']
-_thirdparty_files = get_files(os.path.join(_root, 'third-party/lz4/lib'))
+_resource_files = \
+    get_files(os.path.join(_root, 'build/__cmrc_Renderer-kernels/intermediate')) +\
+    ['build/__cmrc_Renderer-kernels/lib.cpp'] +\
+    get_files(os.path.join(_root, 'build/renderer/__cmrc_Renderer-shaders/intermediate')) +\
+    ['build/renderer/__cmrc_Renderer-shaders/lib.cpp']
+_thirdparty_files = get_files(os.path.join(_root, 'third-party/lz4/lib')) + ['third-party/lodepng/lodepng.cpp']
 _imgui_files = get_files(os.path.join(_root, 'imgui'), '^(?!.*impl).*$')
 print("renderer files:", _renderer_files)
 print("binding files:", _binding_files)
@@ -45,6 +48,7 @@ _include_dirs = [
     '%s/third-party/lz4/lib'%_root,
     '%s/third-party/portable-file-dialogs'%_root,
     '%s/third-party/thread-pool/include'%_root,
+    '%s/third-party/lodepng'%_root,
     '%s/build/_cmrc/include'%_root,
     '%s/compression/include'%_root,
     '%s/compression/src'%_root,
