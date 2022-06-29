@@ -84,7 +84,7 @@ public:
 		}
 
 		n->outputMode_ = outputMode;
-		int outputChannels = OutputParametrization::OutputModeNumChannels[outputMode];
+		int outputChannels = OutputParametrization::OutputModeNumChannelsIn[outputMode];
 		n->last_ = std::make_shared<torch::nn::LinearImpl>(
 			torch::nn::LinearOptions(hiddenChannels, outputChannels).bias(true));
 
@@ -351,8 +351,8 @@ TEST_CASE("Scene-Representation-Networks", "[modules]")
 		MY_INFO("Test network " << (i + 1) << "/" << networks.size() << ": " << networks[i].name);
 		auto networkPytorch = networks[i].networkPytorch;
 	    auto networkTC = networks[i].networkTensorcores;
-		int warpsMixed = networkTC->computeMaxWarps(false);
-		int warpsOnlyShared = networkTC->computeMaxWarps(true);
+		int warpsMixed = networkTC->computeMaxWarps(false, false);
+		int warpsOnlyShared = networkTC->computeMaxWarps(true, false);
 		MY_INFO(" warps mixed: " << warpsMixed << ", only shared: " << warpsOnlyShared);
 		if (warpsMixed <= 0 && warpsOnlyShared <= 0) continue;
 		//try to render
