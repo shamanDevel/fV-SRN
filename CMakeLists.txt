@@ -15,6 +15,7 @@ OPTION(RENDERER_BUILD_TESTS "Build unit test project" ON)
 OPTION(RENDERER_BUILD_BINDINGS "Build the python bindings" ON)
 OPTION(RENDERER_BUILD_CLI "Build command line interface project" ON)
 OPTION(RENDERER_BUILD_OPENGL_SUPPORT "Build with OpenGL rasterization support" ON)
+OPTION(RENDERER_BUILD_COMPRESSION "Build with baseline compression methods for comparison" OFF)
 add_definitions(-DKERNEL_DOUBLE_PRECISION=1) # host: double precision for unit tests
 
 ####################################
@@ -157,7 +158,12 @@ add_subdirectory(third-party/pybind11)
 ####################################
 # COMPRESSION
 ####################################
-add_subdirectory(compression)
+if(${RENDERER_BUILD_COMPRESSION})
+    add_subdirectory(compression)
+    add_definitions(-DRENDERER_BUILD_COMPRESSION=1)
+else()
+    add_definitions(-DRENDERER_BUILD_COMPRESSION=0)
+endif()
 
 ####################################
 # THE LIBRARY

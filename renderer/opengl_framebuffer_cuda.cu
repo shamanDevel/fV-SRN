@@ -7,19 +7,64 @@
 #include "helper_math.cuh"
 #include "renderer_utils.cuh"
 
-texture<float4, cudaTextureType2D, cudaReadModeElementType> framebufferTexRef0;
-texture<float4, cudaTextureType2D, cudaReadModeElementType> framebufferTexRef1;
+namespace
+{
+    class OpenGL2TexRef
+    {
+		cudaGraphicsResource_t tex_;
+		cudaStream_t stream_;
+		cudaArray_t array_;
+		cudaTextureObject_t ref_;
+
+    public:
+		OpenGL2TexRef(cudaGraphicsResource_t tex, cudaStream_t stream)
+		    : tex_(tex), stream_(stream), array_(nullptr), ref_(0)
+		{
+			CUMAT_SAFE_CALL(cudaGraphicsMapResources(1, &tex, stream));
+			CUMAT_SAFE_CALL(cudaGraphicsSubResourceGetMappedArray(&array_, tex, 0, 0));
+			
+			cudaResourceDesc            texRes;
+			memset(&texRes, 0, sizeof(cudaResourceDesc));
+
+			texRes.resType = cudaResourceTypeArray;
+			texRes.res.array.array = array_;
+
+			cudaTextureDesc             texDescr;
+			memset(&texDescr, 0, sizeof(cudaTextureDesc));
+
+			texDescr.normalizedCoords = false;
+			texDescr.filterMode = cudaFilterModePoint;
+			texDescr.addressMode[0] = cudaAddressModeClamp;
+			texDescr.addressMode[1] = cudaAddressModeClamp;
+			texDescr.readMode = cudaReadModeElementType;
+
+			CUMAT_SAFE_CALL(cudaCreateTextureObject(&ref_, &texRes, &texDescr, nullptr));
+		}
+
+		~OpenGL2TexRef()
+		{
+			cudaDestroyTextureObject(ref_);
+			CUMAT_SAFE_CALL(cudaGraphicsUnmapResources(1, &tex_, stream_));
+		}
+
+		cudaTextureObject_t get() const
+		{
+			return ref_;
+		}
+    };
+}
 
 namespace kernel
 {
 	template<typename T>
 	__global__ void FramebufferCopyToCuda(dim3 virtual_size,
-		kernel::Tensor4RW<T> output)
+		kernel::Tensor4RW<T> output,
+		cudaTextureObject_t framebufferTexRef0, cudaTextureObject_t framebufferTexRef1)
 	{
 		CUMAT_KERNEL_2D_LOOP(i, j, virtual_size)
 		{
-			float4 rgba = tex2D(framebufferTexRef0, i, j);
-			float depth = tex2D(framebufferTexRef1, i, j).x;
+			float4 rgba = tex2D<float4>(framebufferTexRef0, i, j);
+			float depth = tex2D<float4>(framebufferTexRef1, i, j).x;
 			//if (rgba.w > 0) printf("{%04d, %04d} d=%f\n", int(i), int(j), depth);
 			output[0][0][j][i] = rgba.x;
 			output[0][1][j][i] = rgba.y;
@@ -37,15 +82,8 @@ namespace kernel
 		kernel::Tensor4RW<T> output,
 		cudaStream_t stream)
 	{
-		CUMAT_SAFE_CALL(cudaGraphicsMapResources(1, &colorTexture, stream));
-		cudaArray_t array0;
-		CUMAT_SAFE_CALL(cudaGraphicsSubResourceGetMappedArray(&array0, colorTexture, 0, 0));
-		CUMAT_SAFE_CALL(cudaBindTextureToArray(framebufferTexRef0, array0));
-
-		CUMAT_SAFE_CALL(cudaGraphicsMapResources(1, &depthTexture, stream));
-		cudaArray_t array1;
-		CUMAT_SAFE_CALL(cudaGraphicsSubResourceGetMappedArray(&array1, depthTexture, 0, 0));
-		CUMAT_SAFE_CALL(cudaBindTextureToArray(framebufferTexRef1, array1));
+		OpenGL2TexRef colorRef(colorTexture, stream);
+		OpenGL2TexRef depthRef(depthTexture, stream);
 
 		int width = output.size(3);
 		int height = output.size(2);
@@ -53,14 +91,8 @@ namespace kernel
 		const auto cfg = ctx.createLaunchConfig2D(width, height, FramebufferCopyToCuda<T>);
 		FramebufferCopyToCuda<T>
 			<<< cfg.block_count, cfg.thread_per_block, 0, stream >>>
-			(cfg.virtual_size, output);
+			(cfg.virtual_size, output, colorRef.get(), depthRef.get());
 		CUMAT_CHECK_ERROR();
-
-		CUMAT_SAFE_CALL(cudaUnbindTexture(framebufferTexRef1));
-		CUMAT_SAFE_CALL(cudaGraphicsUnmapResources(1, &depthTexture, stream));
-
-		CUMAT_SAFE_CALL(cudaUnbindTexture(framebufferTexRef0));
-		CUMAT_SAFE_CALL(cudaGraphicsUnmapResources(1, &colorTexture, stream));
 	}
 
 	void CopyFramebufferToCuda(

@@ -24,7 +24,7 @@ https://arxiv.org/abs/2112.01579
 
 Tested systems:
 
-- Windows 10, Visual Studio 2019, CUDA 11.1, Python 3.9, PyTorch 1.9
+- Windows 10, Visual Studio 2019, CUDA 11.1, Python 3.9, PyTorch 1.9.0
 - Ubuntu 20.04, gcc 9.3.0, CUDA 11.1, Python 3.8, PyTorch 1.8
 
 ## Installation / Project structure
@@ -53,8 +53,6 @@ To generate a stubfile with all the Python functions exposed by the renderer, la
 - Wrong python version used: make sure to run cmake in the same console where the correct python version is selected via conda or virtualenv. This must be done on a clean `build`-folder, as the paths to the python libraries are cached in the `build/CMakeCache.txt`-file.
 - Wrong pytorch version used or no pytorch found: Sometimes, the automatic query of the PyTorch installation folder from the current Python installation failes. You can manually specify the path to PyTorch by passing `-DTORCH_PATH=...` as argument to CMake
 - Libraries `torch_cuda_cpp` and `torch_cuda_cu` are not found. Some PyTorch installations don't split the CUDA-kernels into different libraries, but have a single monolitic library `torch_cuda`. In that case, simply remove `torch_cuda_cpp` and `torch_cuda_cu` from https://github.com/shamanDevel/fV-SRN/blob/master/CMakeLists.txt#L125. If you know a way to query if PyTorch was built with the CUDA-kernels split into multiple libraries, please write me or open an issue. Thanks
-- Built errors in Eigen, `std::free` does not point to a function or similar:
-  In this case, you have to patch the file `third-party/cuMat/third-party/Eigen/src/Core/util/Memory.h` and replace all occurrences of `std::free` by `free` and `std::malloc` by `malloc` (remove the explicit std:: namespace)
 
 ## Noteworthy Files
 
@@ -148,3 +146,13 @@ Supplementary Paper:
 
 The other `eval_*.py` scripts were cut from the paper due to space limitations. They equal the tests above, except that no grid was used and instead the largest possible networks fitting into the TC-architecture
 
+
+
+## Comparisons against other compression algorithms
+
+By default, building the other compression algorithms (TThresh, cudaCompress) for comparisons is disabled. They can be quite tricky to compile.
+
+To enable them, set the CMake-option `RENDERER_BUILD_COMPRESSION` to `ON`  (pass `-DRENDERER_BUILD_COMPRESSION=ON` to cmake). Then re-run cmake, compile the whole project, extract the stubs anew (`python applications/common/create_sub.py`) and you can run the comparisons.
+
+To measure the memory demands during the various compression algorithms, I had to hack `new, malloc(), delete, free()`. This can lead to the build errors in Eigen, `std::free` does not point to a function or similar.
+In this case, you have to patch the file `third-party/cuMat/third-party/Eigen/src/Core/util/Memory.h` and replace all occurrences of `std::free` by `free` and `std::malloc` by `malloc` (remove the explicit std:: namespace)

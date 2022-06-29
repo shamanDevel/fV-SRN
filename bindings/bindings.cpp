@@ -13,7 +13,9 @@
 #include <kernel_loader.h>
 #include <module_registry.h>
 #include <opengl_utils.h>
+#if RENDERER_BUILD_COMPRESSION==1
 #include <compression.h>
+#endif
 #include <volume.h>
 
 #ifdef WIN32
@@ -282,6 +284,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
 void bindCompressionUtils(pybind11::module_& m)
 {
+#if RENDERER_BUILD_COMPRESSION==1
     using namespace compression;
     auto comp = m.def_submodule("compression");
 
@@ -599,4 +602,5 @@ Returns the statistics
     .def("global_statistics", &compression::CudaCompressInteractiveDecompression::globalStatistics,
         py::doc("Returns the accumulated statistics over all decompression calls since construction."))
     ;
+#endif
 }

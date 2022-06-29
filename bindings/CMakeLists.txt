@@ -23,8 +23,11 @@ target_include_directories(${BINDINGS_NAME}
 	)
 target_link_libraries(${BINDINGS_NAME}
 	PRIVATE ${LIBRARY_NAME} 
-	PRIVATE ${LIBRARY_LINK_LIBRARIES}
-	PRIVATE VolumetricCompression)
+	PRIVATE ${LIBRARY_LINK_LIBRARIES})
+if(${RENDERER_BUILD_COMPRESSION})
+    target_link_libraries(${BINDINGS_NAME}
+        PRIVATE VolumetricCompression)
+endif()
 set_property(TARGET ${BINDINGS_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${BINDINGS_NAME} PROPERTY CUDA_ARCHITECTURES 61 72)
 
